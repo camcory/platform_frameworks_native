@@ -426,20 +426,21 @@ bool SensorService::threadLoop()
 }
 
 void SensorService::recordLastValue(
-        sensors_event_t const * buffer, size_t count)
-{
+        const sensors_event_t* buffer, size_t count) {
     Mutex::Autolock _l(mLock);
-    // record the last event for each sensor
-    int32_t prev = buffer[0].sensor;
-    for (size_t i=1 ; i<count ; i++) {
-        // record the last event of each sensor type in this buffer
-        int32_t curr = buffer[i].sensor;
-        if (curr != prev) {
-            mLastEventSeen.editValueFor(prev) = buffer[i-1];
-            prev = curr;
+    const sensors_event_t* last = NULL;
+    for (size_t i = 0; i < count; i++) {
+        const sensors_event_t* event = &buffer[i];
+        if (event->type != SENSOR_TYPE_META_DATA) {
+            if (last && event->sensor != last->sensor) {
+                mLastEventSeen.editValueFor(last->sensor) = *last;
+            }
+            last = event;
         }
     }
-    mLastEventSeen.editValueFor(prev) = buffer[count-1];
+    if (last) {
+        mLastEventSeen.editValueFor(last->sensor) = *last;
+    }
 }
 
 void SensorService::sortEventBuffer(sensors_event_t* buffer, size_t count)
@@ -478,6 +479,11 @@ String8 SensorService::getSensorName(int handle) const {
     }
     String8 result("unknown");
     return result;
+}
+
+bool SensorService::isVirtualSensor(int handle) const {
+    SensorInterface* sensor = mSensorMap.valueFor(handle);
+    return sensor->isVirtual();
 }
 
 Vector<Sensor> SensorService::getSensorList()
@@ -858,6 +864,11 @@ status_t SensorService::SensorEventConnection::sendEvents(
         }
     }
 
+    // Early return if there are no events for this connection.
+    if (count == 0) {
+        return status_t(NO_ERROR);
+    }
+
     // NOTE: ASensorEvent and sensors_event_t are the same type
     ssize_t size = SensorEventQueue::write(mChannel,
             reinterpret_cast<ASensorEvent const*>(scratch), count);
@@ -922,7 +933,7 @@ status_t  SensorService::SensorEventConnection::flush() {
     // Loop through all sensors for this connection and call flush on each of them.
     for (size_t i = 0; i < mSensorInfo.size(); ++i) {
         const int handle = mSensorInfo.keyAt(i);
-        if (halVersion < SENSORS_DEVICE_API_VERSION_1_1) {
+        if (halVersion < SENSORS_DEVICE_API_VERSION_1_1 || mService->isVirtualSensor(handle)) {
             // For older devices just increment pending flush count which will send a trivial
             // flush complete event.
             FlushInfo& flushInfo = mSensorInfo.editValueFor(handle);
