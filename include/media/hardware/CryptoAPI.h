@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
+#include <media/stagefright/MediaErrors.h>
 #include <utils/Errors.h>
+#include <utils/Vector.h>
 
 #ifndef CRYPTO_API_H_
 
@@ -51,8 +53,8 @@ struct CryptoPlugin {
     };
 
     struct SubSample {
-        size_t mNumBytesOfClearData;
-        size_t mNumBytesOfEncryptedData;
+        uint32_t mNumBytesOfClearData;
+        uint32_t mNumBytesOfEncryptedData;
     };
 
     CryptoPlugin() {}
@@ -63,6 +65,23 @@ struct CryptoPlugin {
     // to support insecure decryption of the data (secure = false) for
     // media data of the given mime type.
     virtual bool requiresSecureDecoderComponent(const char *mime) const = 0;
+
+    // To implement resolution constraints, the crypto plugin needs to know
+    // the resolution of the video being decrypted.  The media player should
+    // call this method when the resolution is determined and any time it
+    // is subsequently changed.
+
+    virtual void notifyResolution(uint32_t /* width */, uint32_t /* height */) {}
+
+    // A MediaDrm session may be associated with a MediaCrypto session.  The
+    // associated MediaDrm session is used to load decryption keys
+    // into the crypto/drm plugin.  The keys are then referenced by key-id
+    // in the 'key' parameter to the decrypt() method.
+    // Should return NO_ERROR on success, ERROR_DRM_SESSION_NOT_OPENED if
+    // the session is not opened and a code from MediaErrors.h otherwise.
+    virtual status_t setMediaDrmSession(const Vector<uint8_t> & /*sessionId */) {
+        return ERROR_UNSUPPORTED;
+    }
 
     // If the error returned falls into the range
     // ERROR_DRM_VENDOR_MIN..ERROR_DRM_VENDOR_MAX, errorDetailMsg should be

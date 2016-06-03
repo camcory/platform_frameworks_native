@@ -15,13 +15,12 @@
  */
 
 #include <ui/PixelFormat.h>
-#include <hardware/hardware.h>
 
 // ----------------------------------------------------------------------------
 namespace android {
 // ----------------------------------------------------------------------------
 
-ssize_t bytesPerPixel(PixelFormat format) {
+uint32_t bytesPerPixel(PixelFormat format) {
     switch (format) {
         case PIXEL_FORMAT_RGBA_8888:
         case PIXEL_FORMAT_RGBX_8888:
@@ -34,10 +33,10 @@ ssize_t bytesPerPixel(PixelFormat format) {
         case PIXEL_FORMAT_RGBA_4444:
             return 2;
     }
-    return BAD_VALUE;
+    return 0;
 }
 
-ssize_t bitsPerPixel(PixelFormat format) {
+uint32_t bitsPerPixel(PixelFormat format) {
     switch (format) {
         case PIXEL_FORMAT_RGBA_8888:
         case PIXEL_FORMAT_RGBX_8888:
@@ -50,10 +49,9 @@ ssize_t bitsPerPixel(PixelFormat format) {
         case PIXEL_FORMAT_RGBA_4444:
             return 16;
     }
-    return BAD_VALUE;
+    return 0;
 }
 
 // ----------------------------------------------------------------------------
 }; // namespace android
 // ----------------------------------------------------------------------------
-

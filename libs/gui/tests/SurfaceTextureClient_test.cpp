@@ -27,6 +27,9 @@
 #include <utils/Log.h>
 #include <utils/Thread.h>
 
+EGLAPI const char* eglQueryStringImplementationANDROID(EGLDisplay dpy, EGLint name);
+#define CROP_EXT_STR "EGL_ANDROID_image_crop"
+
 namespace android {
 
 class SurfaceTextureClientTest : public ::testing::Test {
@@ -43,9 +46,12 @@ protected:
         ALOGV("Begin test: %s.%s", testInfo->test_case_name(),
                 testInfo->name());
 
-        sp<BufferQueue> bq = new BufferQueue();
-        mST = new GLConsumer(bq, 123);
-        mSTC = new Surface(bq);
+        sp<IGraphicBufferProducer> producer;
+        sp<IGraphicBufferConsumer> consumer;
+        BufferQueue::createBufferQueue(&producer, &consumer);
+        mST = new GLConsumer(consumer, 123, GLConsumer::TEXTURE_EXTERNAL, true,
+                false);
+        mSTC = new Surface(producer);
         mANW = mSTC;
 
         // We need a valid GL context so we can test updateTexImage()
@@ -204,12 +210,8 @@ TEST_F(SurfaceTextureClientTest, EglSwapBuffersAbandonErrorIsEglBadSurface) {
 }
 
 TEST_F(SurfaceTextureClientTest, BufferGeometryInvalidSizesFail) {
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(), -1,  0,  0));
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(),  0, -1,  0));
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(),  0,  0, -1));
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(), -1, -1,  0));
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(),  0,  8,  0));
-    EXPECT_GT(OK, native_window_set_buffers_geometry(mANW.get(),  8,  0,  0));
+    EXPECT_GT(OK, native_window_set_buffers_dimensions(mANW.get(),  0,  8));
+    EXPECT_GT(OK, native_window_set_buffers_dimensions(mANW.get(),  8,  0));
 }
 
 TEST_F(SurfaceTextureClientTest, DefaultGeometryValues) {
@@ -223,7 +225,8 @@ TEST_F(SurfaceTextureClientTest, DefaultGeometryValues) {
 
 TEST_F(SurfaceTextureClientTest, BufferGeometryCanBeSet) {
     ANativeWindowBuffer* buf;
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 16, 8, PIXEL_FORMAT_RGB_565));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 16, 8));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), PIXEL_FORMAT_RGB_565));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(16, buf->width);
     EXPECT_EQ(8, buf->height);
@@ -233,7 +236,8 @@ TEST_F(SurfaceTextureClientTest, BufferGeometryCanBeSet) {
 
 TEST_F(SurfaceTextureClientTest, BufferGeometryDefaultSizeSetFormat) {
     ANativeWindowBuffer* buf;
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 0, 0, PIXEL_FORMAT_RGB_565));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 0, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), PIXEL_FORMAT_RGB_565));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(1, buf->width);
     EXPECT_EQ(1, buf->height);
@@ -243,7 +247,8 @@ TEST_F(SurfaceTextureClientTest, BufferGeometryDefaultSizeSetFormat) {
 
 TEST_F(SurfaceTextureClientTest, BufferGeometrySetSizeDefaultFormat) {
     ANativeWindowBuffer* buf;
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 16, 8, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 16, 8));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), 0));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(16, buf->width);
     EXPECT_EQ(8, buf->height);
@@ -253,13 +258,15 @@ TEST_F(SurfaceTextureClientTest, BufferGeometrySetSizeDefaultFormat) {
 
 TEST_F(SurfaceTextureClientTest, BufferGeometrySizeCanBeUnset) {
     ANativeWindowBuffer* buf;
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 16, 8, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 16, 8));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), 0));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(16, buf->width);
     EXPECT_EQ(8, buf->height);
     EXPECT_EQ(PIXEL_FORMAT_RGBA_8888, buf->format);
     ASSERT_EQ(OK, mANW->cancelBuffer(mANW.get(), buf, -1));
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 0, 0, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 0, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), 0));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(1, buf->width);
     EXPECT_EQ(1, buf->height);
@@ -269,7 +276,8 @@ TEST_F(SurfaceTextureClientTest, BufferGeometrySizeCanBeUnset) {
 
 TEST_F(SurfaceTextureClientTest, BufferGeometrySizeCanBeChangedWithoutFormat) {
     ANativeWindowBuffer* buf;
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 0, 0, PIXEL_FORMAT_RGB_565));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 0, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), PIXEL_FORMAT_RGB_565));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf));
     EXPECT_EQ(1, buf->width);
     EXPECT_EQ(1, buf->height);
@@ -327,7 +335,8 @@ TEST_F(SurfaceTextureClientTest, SurfaceTextureSetDefaultSizeVsGeometry) {
     EXPECT_EQ(8, buf[1]->height);
     ASSERT_EQ(OK, mANW->cancelBuffer(mANW.get(), buf[0], -1));
     ASSERT_EQ(OK, mANW->cancelBuffer(mANW.get(), buf[1], -1));
-    EXPECT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 12, 24, 0));
+    EXPECT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 12, 24));
+    EXPECT_EQ(OK, native_window_set_buffers_format(mANW.get(), 0));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf[0]));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf[1]));
     EXPECT_NE(buf[0], buf[1]);
@@ -465,7 +474,8 @@ TEST_F(SurfaceTextureClientTest, SurfaceTextureSyncModeMinUndequeued) {
 
     // Once we've queued a buffer, however we should not be able to dequeue more
     // than (buffer-count - MIN_UNDEQUEUED_BUFFERS), which is 2 in this case.
-    EXPECT_EQ(-EBUSY, native_window_dequeue_buffer_and_wait(mANW.get(), &buf[1]));
+    EXPECT_EQ(INVALID_OPERATION,
+            native_window_dequeue_buffer_and_wait(mANW.get(), &buf[1]));
 
     ASSERT_EQ(OK, mANW->cancelBuffer(mANW.get(), buf[0], -1));
     ASSERT_EQ(OK, mANW->cancelBuffer(mANW.get(), buf[2], -1));
@@ -608,6 +618,18 @@ TEST_F(SurfaceTextureClientTest, GetTransformMatrixSucceedsAfterFreeingBuffers) 
 }
 
 TEST_F(SurfaceTextureClientTest, GetTransformMatrixSucceedsAfterFreeingBuffersWithCrop) {
+    // Query to see if the image crop extension exists
+    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    const char* exts = eglQueryStringImplementationANDROID(dpy, EGL_EXTENSIONS);
+    size_t cropExtLen = strlen(CROP_EXT_STR);
+    size_t extsLen = strlen(exts);
+    bool equal = !strcmp(CROP_EXT_STR, exts);
+    bool atStart = !strncmp(CROP_EXT_STR " ", exts, cropExtLen+1);
+    bool atEnd = (cropExtLen+1) < extsLen &&
+            !strcmp(" " CROP_EXT_STR, exts + extsLen - (cropExtLen+1));
+    bool inMiddle = strstr(exts, " " CROP_EXT_STR " ");
+    bool hasEglAndroidImageCrop = equal || atStart || atEnd || inMiddle;
+
     android_native_buffer_t* buf[3];
     float mtx[16] = {};
     android_native_rect_t crop;
@@ -617,7 +639,8 @@ TEST_F(SurfaceTextureClientTest, GetTransformMatrixSucceedsAfterFreeingBuffersWi
     crop.bottom = 5;
 
     ASSERT_EQ(OK, native_window_set_buffer_count(mANW.get(), 4));
-    ASSERT_EQ(OK, native_window_set_buffers_geometry(mANW.get(), 8, 8, 0));
+    ASSERT_EQ(OK, native_window_set_buffers_dimensions(mANW.get(), 8, 8));
+    ASSERT_EQ(OK, native_window_set_buffers_format(mANW.get(), 0));
     ASSERT_EQ(OK, native_window_dequeue_buffer_and_wait(mANW.get(), &buf[0]));
     ASSERT_EQ(OK, native_window_set_crop(mANW.get(), &crop));
     ASSERT_EQ(OK, mANW->queueBuffer(mANW.get(), buf[0], -1));
@@ -625,15 +648,17 @@ TEST_F(SurfaceTextureClientTest, GetTransformMatrixSucceedsAfterFreeingBuffersWi
     ASSERT_EQ(OK, native_window_set_buffer_count(mANW.get(), 6)); // frees buffers
     mST->getTransformMatrix(mtx);
 
-    // This accounts for the .5 texel shrink for each edge that's included in the
-    // transform matrix to avoid texturing outside the crop region.
-    EXPECT_EQ(0.5, mtx[0]);
+    // If the egl image crop extension is not present, this accounts for the
+    // .5 texel shrink for each edge that's included in the transform matrix
+    // to avoid texturing outside the crop region. Otherwise the crop is not
+    // included in the transform matrix.
+    EXPECT_EQ(hasEglAndroidImageCrop ? 1 : 0.5, mtx[0]);
     EXPECT_EQ(0.f, mtx[1]);
     EXPECT_EQ(0.f, mtx[2]);
     EXPECT_EQ(0.f, mtx[3]);
 
     EXPECT_EQ(0.f, mtx[4]);
-    EXPECT_EQ(-0.5, mtx[5]);
+    EXPECT_EQ(hasEglAndroidImageCrop ? -1 : -0.5, mtx[5]);
     EXPECT_EQ(0.f, mtx[6]);
     EXPECT_EQ(0.f, mtx[7]);
 
@@ -642,8 +667,8 @@ TEST_F(SurfaceTextureClientTest, GetTransformMatrixSucceedsAfterFreeingBuffersWi
     EXPECT_EQ(1.f, mtx[10]);
     EXPECT_EQ(0.f, mtx[11]);
 
-    EXPECT_EQ(0.0625f, mtx[12]);
-    EXPECT_EQ(0.5625f, mtx[13]);
+    EXPECT_EQ(hasEglAndroidImageCrop ? 0 : 0.0625f, mtx[12]);
+    EXPECT_EQ(hasEglAndroidImageCrop ? 1 : 0.5625f, mtx[13]);
     EXPECT_EQ(0.f, mtx[14]);
     EXPECT_EQ(1.f, mtx[15]);
 }
@@ -665,7 +690,8 @@ TEST_F(SurfaceTextureClientTest, QueryFormatAfterSettingWorks) {
     const int numFmts = (sizeof(fmts) / sizeof(fmts[0]));
     for (int i = 0; i < numFmts; i++) {
       int fmt = -1;
-      ASSERT_EQ(OK, native_window_set_buffers_geometry(anw.get(), 0, 0, fmts[i]));
+      ASSERT_EQ(OK, native_window_set_buffers_dimensions(anw.get(), 0, 0));
+      ASSERT_EQ(OK, native_window_set_buffers_format(anw.get(), fmts[i]));
       ASSERT_EQ(OK, anw->query(anw.get(), NATIVE_WINDOW_FORMAT, &fmt));
       EXPECT_EQ(fmts[i], fmt);
     }
@@ -711,9 +737,12 @@ protected:
         ASSERT_NE(EGL_NO_CONTEXT, mEglContext);
 
         for (int i = 0; i < NUM_SURFACE_TEXTURES; i++) {
-            sp<BufferQueue> bq = new BufferQueue();
-            sp<GLConsumer> st(new GLConsumer(bq, i));
-            sp<Surface> stc(new Surface(bq));
+            sp<IGraphicBufferProducer> producer;
+            sp<IGraphicBufferConsumer> consumer;
+            BufferQueue::createBufferQueue(&producer, &consumer);
+            sp<GLConsumer> st(new GLConsumer(consumer, i,
+                    GLConsumer::TEXTURE_EXTERNAL, true, false));
+            sp<Surface> stc(new Surface(producer));
             mEglSurfaces[i] = eglCreateWindowSurface(mEglDisplay, myConfig,
                     static_cast<ANativeWindow*>(stc.get()), NULL);
             ASSERT_EQ(EGL_SUCCESS, eglGetError());

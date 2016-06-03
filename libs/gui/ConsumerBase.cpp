@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <inttypes.h>
+
 #define LOG_TAG "ConsumerBase"
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 //#define LOG_NDEBUG 0
@@ -25,6 +27,7 @@
 
 #include <hardware/hardware.h>
 
+#include <gui/BufferItem.h>
 #include <gui/IGraphicBufferAlloc.h>
 #include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
@@ -37,11 +40,11 @@
 #include <utils/Trace.h>
 
 // Macros for including the ConsumerBase name in log messages
-#define CB_LOGV(x, ...) ALOGV("[%s] "x, mName.string(), ##__VA_ARGS__)
-#define CB_LOGD(x, ...) ALOGD("[%s] "x, mName.string(), ##__VA_ARGS__)
-#define CB_LOGI(x, ...) ALOGI("[%s] "x, mName.string(), ##__VA_ARGS__)
-#define CB_LOGW(x, ...) ALOGW("[%s] "x, mName.string(), ##__VA_ARGS__)
-#define CB_LOGE(x, ...) ALOGE("[%s] "x, mName.string(), ##__VA_ARGS__)
+#define CB_LOGV(x, ...) ALOGV("[%s] " x, mName.string(), ##__VA_ARGS__)
+//#define CB_LOGD(x, ...) ALOGD("[%s] " x, mName.string(), ##__VA_ARGS__)
+//#define CB_LOGI(x, ...) ALOGI("[%s] " x, mName.string(), ##__VA_ARGS__)
+//#define CB_LOGW(x, ...) ALOGW("[%s] " x, mName.string(), ##__VA_ARGS__)
+#define CB_LOGE(x, ...) ALOGE("[%s] " x, mName.string(), ##__VA_ARGS__)
 
 namespace android {
 
@@ -85,7 +88,7 @@ ConsumerBase::~ConsumerBase() {
         "consumer is not abandoned!", mName.string());
 }
 
-void ConsumerBase::onLastStrongRef(const void* id) {
+void ConsumerBase::onLastStrongRef(const void* id __attribute__((unused))) {
     abandon();
 }
 
@@ -96,7 +99,7 @@ void ConsumerBase::freeBufferLocked(int slotIndex) {
     mSlots[slotIndex].mFrameNumber = 0;
 }
 
-void ConsumerBase::onFrameAvailable() {
+void ConsumerBase::onFrameAvailable(const BufferItem& item) {
     CB_LOGV("onFrameAvailable");
 
     sp<FrameAvailableListener> listener;
@@ -107,7 +110,22 @@ void ConsumerBase::onFrameAvailable() {
 
     if (listener != NULL) {
         CB_LOGV("actually calling onFrameAvailable");
-        listener->onFrameAvailable();
+        listener->onFrameAvailable(item);
+    }
+}
+
+void ConsumerBase::onFrameReplaced(const BufferItem &item) {
+    CB_LOGV("onFrameReplaced");
+
+    sp<FrameAvailableListener> listener;
+    {
+        Mutex::Autolock lock(mMutex);
+        listener = mFrameAvailableListener.promote();
+    }
+
+    if (listener != NULL) {
+        CB_LOGV("actually calling onFrameReplaced");
+        listener->onFrameReplaced(item);
     }
 }
 
@@ -121,13 +139,16 @@ void ConsumerBase::onBuffersReleased() {
         return;
     }
 
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     mConsumer->getReleasedBuffers(&mask);
     for (int i = 0; i < BufferQueue::NUM_BUFFER_SLOTS; i++) {
-        if (mask & (1 << i)) {
+        if (mask & (1ULL << i)) {
             freeBufferLocked(i);
         }
     }
+}
+
+void ConsumerBase::onSidebandStreamChanged() {
 }
 
 void ConsumerBase::abandon() {
@@ -150,11 +171,47 @@ void ConsumerBase::abandonLocked() {
     mConsumer.clear();
 }
 
+bool ConsumerBase::isAbandoned() {
+    Mutex::Autolock _l(mMutex);
+    return mAbandoned;
+}
+
 void ConsumerBase::setFrameAvailableListener(
         const wp<FrameAvailableListener>& listener) {
     CB_LOGV("setFrameAvailableListener");
     Mutex::Autolock lock(mMutex);
     mFrameAvailableListener = listener;
+}
+
+status_t ConsumerBase::detachBuffer(int slot) {
+    CB_LOGV("detachBuffer");
+    Mutex::Autolock lock(mMutex);
+
+    status_t result = mConsumer->detachBuffer(slot);
+    if (result != NO_ERROR) {
+        CB_LOGE("Failed to detach buffer: %d", result);
+        return result;
+    }
+
+    freeBufferLocked(slot);
+
+    return result;
+}
+
+status_t ConsumerBase::setDefaultBufferSize(uint32_t width, uint32_t height) {
+    Mutex::Autolock _l(mMutex);
+    return mConsumer->setDefaultBufferSize(width, height);
+}
+
+status_t ConsumerBase::setDefaultBufferFormat(PixelFormat defaultFormat) {
+    Mutex::Autolock _l(mMutex);
+    return mConsumer->setDefaultBufferFormat(defaultFormat);
+}
+
+status_t ConsumerBase::setDefaultBufferDataSpace(
+        android_dataspace defaultDataSpace) {
+    Mutex::Autolock _l(mMutex);
+    return mConsumer->setDefaultBufferDataSpace(defaultDataSpace);
 }
 
 void ConsumerBase::dump(String8& result) const {
@@ -174,9 +231,9 @@ void ConsumerBase::dumpLocked(String8& result, const char* prefix) const {
     }
 }
 
-status_t ConsumerBase::acquireBufferLocked(BufferQueue::BufferItem *item,
-        nsecs_t presentWhen) {
-    status_t err = mConsumer->acquireBuffer(item, presentWhen);
+status_t ConsumerBase::acquireBufferLocked(BufferItem *item,
+        nsecs_t presentWhen, uint64_t maxFrameNumber) {
+    status_t err = mConsumer->acquireBuffer(item, presentWhen, maxFrameNumber);
     if (err != NO_ERROR) {
         return err;
     }
@@ -188,7 +245,7 @@ status_t ConsumerBase::acquireBufferLocked(BufferQueue::BufferItem *item,
     mSlots[item->mBuf].mFrameNumber = item->mFrameNumber;
     mSlots[item->mBuf].mFence = item->mFence;
 
-    CB_LOGV("acquireBufferLocked: -> slot=%d/%llu",
+    CB_LOGV("acquireBufferLocked: -> slot=%d/%" PRIu64,
             item->mBuf, item->mFrameNumber);
 
     return OK;
@@ -239,11 +296,11 @@ status_t ConsumerBase::releaseBufferLocked(
         return OK;
     }
 
-    CB_LOGV("releaseBufferLocked: slot=%d/%llu",
+    CB_LOGV("releaseBufferLocked: slot=%d/%" PRIu64,
             slot, mSlots[slot].mFrameNumber);
     status_t err = mConsumer->releaseBuffer(slot, mSlots[slot].mFrameNumber,
             display, eglFence, mSlots[slot].mFence);
-    if (err == BufferQueue::STALE_BUFFER_SLOT) {
+    if (err == IGraphicBufferConsumer::STALE_BUFFER_SLOT) {
         freeBufferLocked(slot);
     }
 

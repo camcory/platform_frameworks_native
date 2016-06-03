@@ -21,7 +21,7 @@
 #include <limits.h>
 
 #include <input/Keyboard.h>
-#include <input/KeycodeLabels.h>
+#include <input/InputEventLabels.h>
 #include <input/KeyLayoutMap.h>
 #include <input/KeyCharacterMap.h>
 #include <input/InputDevice.h>
@@ -167,42 +167,6 @@ bool isEligibleBuiltInKeyboard(const InputDeviceIdentifier& deviceIdentifier,
     return strstr(deviceIdentifier.name.string(), "-keypad");
 }
 
-static int lookupValueByLabel(const char* literal, const KeycodeLabel *list) {
-    while (list->literal) {
-        if (strcmp(literal, list->literal) == 0) {
-            return list->value;
-        }
-        list++;
-    }
-    return list->value;
-}
-
-static const char* lookupLabelByValue(int value, const KeycodeLabel *list) {
-    while (list->literal) {
-        if (list->value == value) {
-            return list->literal;
-        }
-        list++;
-    }
-    return NULL;
-}
-
-int32_t getKeyCodeByLabel(const char* label) {
-    return int32_t(lookupValueByLabel(label, KEYCODES));
-}
-
-uint32_t getKeyFlagByLabel(const char* label) {
-    return uint32_t(lookupValueByLabel(label, FLAGS));
-}
-
-int32_t getAxisByLabel(const char* label) {
-    return int32_t(lookupValueByLabel(label, AXES));
-}
-
-const char* getAxisLabel(int32_t axisId) {
-    return lookupLabelByValue(axisId, AXES);
-}
-
 static int32_t setEphemeralMetaState(int32_t mask, bool down, int32_t oldMetaState) {
     int32_t newMetaState;
     if (down) {
@@ -212,6 +176,11 @@ static int32_t setEphemeralMetaState(int32_t mask, bool down, int32_t oldMetaSta
                 ~(mask | AMETA_ALT_ON | AMETA_SHIFT_ON | AMETA_CTRL_ON | AMETA_META_ON);
     }
 
+    return normalizeMetaState(newMetaState);
+}
+
+int32_t normalizeMetaState(int32_t oldMetaState) {
+    int32_t newMetaState = oldMetaState;
     if (newMetaState & (AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON)) {
         newMetaState |= AMETA_ALT_ON;
     }

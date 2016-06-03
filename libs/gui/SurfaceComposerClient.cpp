@@ -71,7 +71,7 @@ void ComposerService::connectLocked() {
     };
 
     mDeathObserver = new DeathObserver(*const_cast<ComposerService*>(this));
-    mComposerService->asBinder()->linkToDeath(mDeathObserver);
+    IInterface::asBinder(mComposerService)->linkToDeath(mDeathObserver);
 }
 
 /*static*/ sp<ISurfaceComposer> ComposerService::getComposerService() {
@@ -143,7 +143,7 @@ public:
     status_t setSize(const sp<SurfaceComposerClient>& client, const sp<IBinder>& id,
             uint32_t w, uint32_t h);
     status_t setLayer(const sp<SurfaceComposerClient>& client, const sp<IBinder>& id,
-            int32_t z);
+            uint32_t z);
     status_t setFlags(const sp<SurfaceComposerClient>& client, const sp<IBinder>& id,
             uint32_t flags, uint32_t mask);
     status_t setTransparentRegionHint(
@@ -166,6 +166,7 @@ public:
             uint32_t orientation,
             const Rect& layerStackRect,
             const Rect& displayRect);
+    void setDisplaySize(const sp<IBinder>& token, uint32_t width, uint32_t height);
 
     static void setAnimationTransaction() {
         Composer::getInstance().setAnimationTransactionImpl();
@@ -292,7 +293,7 @@ status_t Composer::setSize(const sp<SurfaceComposerClient>& client,
 }
 
 status_t Composer::setLayer(const sp<SurfaceComposerClient>& client,
-        const sp<IBinder>& id, int32_t z) {
+        const sp<IBinder>& id, uint32_t z) {
     Mutex::Autolock _l(mLock);
     layer_state_t* s = getLayerStateLocked(client, id);
     if (!s)
@@ -309,7 +310,11 @@ status_t Composer::setFlags(const sp<SurfaceComposerClient>& client,
     layer_state_t* s = getLayerStateLocked(client, id);
     if (!s)
         return BAD_INDEX;
-    s->what |= layer_state_t::eVisibilityChanged;
+    if (mask & layer_state_t::eLayerOpaque ||
+            mask & layer_state_t::eLayerHidden ||
+            mask & layer_state_t::eLayerSecure) {
+        s->what |= layer_state_t::eFlagsChanged;
+    }
     s->flags &= ~mask;
     s->flags |= (flags & mask);
     s->mask |= mask;
@@ -389,7 +394,7 @@ DisplayState& Composer::getDisplayStateLocked(const sp<IBinder>& token) {
         s.what = 0;
         index = mDisplayStates.add(s);
     }
-    return mDisplayStates.editItemAt(index);
+    return mDisplayStates.editItemAt(static_cast<size_t>(index));
 }
 
 void Composer::setDisplaySurface(const sp<IBinder>& token,
@@ -421,6 +426,14 @@ void Composer::setDisplayProjection(const sp<IBinder>& token,
     mForceSynchronous = true; // TODO: do we actually still need this?
 }
 
+void Composer::setDisplaySize(const sp<IBinder>& token, uint32_t width, uint32_t height) {
+    Mutex::Autolock _l(mLock);
+    DisplayState& s(getDisplayStateLocked(token));
+    s.width = width;
+    s.height = height;
+    s.what |= DisplayState::eDisplaySizeChanged;
+}
+
 // ---------------------------------------------------------------------------
 
 SurfaceComposerClient::SurfaceComposerClient()
@@ -448,14 +461,14 @@ status_t SurfaceComposerClient::initCheck() const {
 }
 
 sp<IBinder> SurfaceComposerClient::connection() const {
-    return (mClient != 0) ? mClient->asBinder() : 0;
+    return IInterface::asBinder(mClient);
 }
 
 status_t SurfaceComposerClient::linkToComposerDeath(
         const sp<IBinder::DeathRecipient>& recipient,
         void* cookie, uint32_t flags) {
     sp<ISurfaceComposer> sm(ComposerService::getComposerService());
-    return sm->asBinder()->linkToDeath(recipient, cookie, flags);
+    return IInterface::asBinder(sm)->linkToDeath(recipient, cookie, flags);
 }
 
 void SurfaceComposerClient::dispose() {
@@ -510,6 +523,21 @@ status_t SurfaceComposerClient::destroySurface(const sp<IBinder>& sid) {
     return err;
 }
 
+status_t SurfaceComposerClient::clearLayerFrameStats(const sp<IBinder>& token) const {
+    if (mStatus != NO_ERROR) {
+        return mStatus;
+    }
+    return mClient->clearLayerFrameStats(token);
+}
+
+status_t SurfaceComposerClient::getLayerFrameStats(const sp<IBinder>& token,
+        FrameStats* outStats) const {
+    if (mStatus != NO_ERROR) {
+        return mStatus;
+    }
+    return mClient->getLayerFrameStats(token, outStats);
+}
+
 inline Composer& SurfaceComposerClient::getComposer() {
     return mComposer;
 }
@@ -542,7 +570,7 @@ status_t SurfaceComposerClient::setSize(const sp<IBinder>& id, uint32_t w, uint3
     return getComposer().setSize(this, id, w, h);
 }
 
-status_t SurfaceComposerClient::setLayer(const sp<IBinder>& id, int32_t z) {
+status_t SurfaceComposerClient::setLayer(const sp<IBinder>& id, uint32_t z) {
     return getComposer().setLayer(this, id, z);
 }
 
@@ -601,20 +629,56 @@ void SurfaceComposerClient::setDisplayProjection(const sp<IBinder>& token,
             layerStackRect, displayRect);
 }
 
+void SurfaceComposerClient::setDisplaySize(const sp<IBinder>& token,
+        uint32_t width, uint32_t height) {
+    Composer::getInstance().setDisplaySize(token, width, height);
+}
+
 // ----------------------------------------------------------------------------
 
-status_t SurfaceComposerClient::getDisplayInfo(
-        const sp<IBinder>& display, DisplayInfo* info)
+status_t SurfaceComposerClient::getDisplayConfigs(
+        const sp<IBinder>& display, Vector<DisplayInfo>* configs)
 {
-    return ComposerService::getComposerService()->getDisplayInfo(display, info);
+    return ComposerService::getComposerService()->getDisplayConfigs(display, configs);
 }
 
-void SurfaceComposerClient::blankDisplay(const sp<IBinder>& token) {
-    ComposerService::getComposerService()->blank(token);
+status_t SurfaceComposerClient::getDisplayInfo(const sp<IBinder>& display,
+        DisplayInfo* info) {
+    Vector<DisplayInfo> configs;
+    status_t result = getDisplayConfigs(display, &configs);
+    if (result != NO_ERROR) {
+        return result;
+    }
+
+    int activeId = getActiveConfig(display);
+    if (activeId < 0) {
+        ALOGE("No active configuration found");
+        return NAME_NOT_FOUND;
+    }
+
+    *info = configs[static_cast<size_t>(activeId)];
+    return NO_ERROR;
 }
 
-void SurfaceComposerClient::unblankDisplay(const sp<IBinder>& token) {
-    ComposerService::getComposerService()->unblank(token);
+int SurfaceComposerClient::getActiveConfig(const sp<IBinder>& display) {
+    return ComposerService::getComposerService()->getActiveConfig(display);
+}
+
+status_t SurfaceComposerClient::setActiveConfig(const sp<IBinder>& display, int id) {
+    return ComposerService::getComposerService()->setActiveConfig(display, id);
+}
+
+void SurfaceComposerClient::setDisplayPowerMode(const sp<IBinder>& token,
+        int mode) {
+    ComposerService::getComposerService()->setPowerMode(token, mode);
+}
+
+status_t SurfaceComposerClient::clearAnimationFrameStats() {
+    return ComposerService::getComposerService()->clearAnimationFrameStats();
+}
+
+status_t SurfaceComposerClient::getAnimationFrameStats(FrameStats* outStats) {
+    return ComposerService::getComposerService()->getAnimationFrameStats(outStats);
 }
 
 // ----------------------------------------------------------------------------
@@ -622,12 +686,12 @@ void SurfaceComposerClient::unblankDisplay(const sp<IBinder>& token) {
 status_t ScreenshotClient::capture(
         const sp<IBinder>& display,
         const sp<IGraphicBufferProducer>& producer,
-        uint32_t reqWidth, uint32_t reqHeight,
-        uint32_t minLayerZ, uint32_t maxLayerZ) {
+        Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+        uint32_t minLayerZ, uint32_t maxLayerZ, bool useIdentityTransform) {
     sp<ISurfaceComposer> s(ComposerService::getComposerService());
     if (s == NULL) return NO_INIT;
-    return s->captureScreen(display, producer,
-            reqWidth, reqHeight, minLayerZ, maxLayerZ);
+    return s->captureScreen(display, producer, sourceCrop,
+            reqWidth, reqHeight, minLayerZ, maxLayerZ, useIdentityTransform);
 }
 
 ScreenshotClient::ScreenshotClient()
@@ -641,16 +705,18 @@ ScreenshotClient::~ScreenshotClient() {
 
 sp<CpuConsumer> ScreenshotClient::getCpuConsumer() const {
     if (mCpuConsumer == NULL) {
-        mBufferQueue = new BufferQueue();
-        mCpuConsumer = new CpuConsumer(mBufferQueue, 1);
+        sp<IGraphicBufferConsumer> consumer;
+        BufferQueue::createBufferQueue(&mProducer, &consumer);
+        mCpuConsumer = new CpuConsumer(consumer, 1);
         mCpuConsumer->setName(String8("ScreenshotClient"));
     }
     return mCpuConsumer;
 }
 
 status_t ScreenshotClient::update(const sp<IBinder>& display,
-        uint32_t reqWidth, uint32_t reqHeight,
-        uint32_t minLayerZ, uint32_t maxLayerZ) {
+        Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+        uint32_t minLayerZ, uint32_t maxLayerZ,
+        bool useIdentityTransform, uint32_t rotation) {
     sp<ISurfaceComposer> s(ComposerService::getComposerService());
     if (s == NULL) return NO_INIT;
     sp<CpuConsumer> cpuConsumer = getCpuConsumer();
@@ -661,8 +727,9 @@ status_t ScreenshotClient::update(const sp<IBinder>& display,
         mHaveBuffer = false;
     }
 
-    status_t err = s->captureScreen(display, mBufferQueue,
-            reqWidth, reqHeight, minLayerZ, maxLayerZ);
+    status_t err = s->captureScreen(display, mProducer, sourceCrop,
+            reqWidth, reqHeight, minLayerZ, maxLayerZ, useIdentityTransform,
+            static_cast<ISurfaceComposer::Rotation>(rotation));
 
     if (err == NO_ERROR) {
         err = mCpuConsumer->lockNextBuffer(&mBuffer);
@@ -673,13 +740,25 @@ status_t ScreenshotClient::update(const sp<IBinder>& display,
     return err;
 }
 
-status_t ScreenshotClient::update(const sp<IBinder>& display) {
-    return ScreenshotClient::update(display, 0, 0, 0, -1UL);
+status_t ScreenshotClient::update(const sp<IBinder>& display,
+        Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+        uint32_t minLayerZ, uint32_t maxLayerZ,
+        bool useIdentityTransform) {
+
+    return ScreenshotClient::update(display, sourceCrop, reqWidth, reqHeight,
+            minLayerZ, maxLayerZ, useIdentityTransform, ISurfaceComposer::eRotateNone);
 }
 
-status_t ScreenshotClient::update(const sp<IBinder>& display,
-        uint32_t reqWidth, uint32_t reqHeight) {
-    return ScreenshotClient::update(display, reqWidth, reqHeight, 0, -1UL);
+status_t ScreenshotClient::update(const sp<IBinder>& display, Rect sourceCrop,
+        bool useIdentityTransform) {
+    return ScreenshotClient::update(display, sourceCrop, 0, 0, 0, -1U,
+            useIdentityTransform, ISurfaceComposer::eRotateNone);
+}
+
+status_t ScreenshotClient::update(const sp<IBinder>& display, Rect sourceCrop,
+        uint32_t reqWidth, uint32_t reqHeight, bool useIdentityTransform) {
+    return ScreenshotClient::update(display, sourceCrop, reqWidth, reqHeight,
+            0, -1U, useIdentityTransform, ISurfaceComposer::eRotateNone);
 }
 
 void ScreenshotClient::release() {

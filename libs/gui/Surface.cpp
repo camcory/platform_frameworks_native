@@ -24,9 +24,12 @@
 
 #include <utils/Log.h>
 #include <utils/Trace.h>
+#include <utils/NativeHandle.h>
 
 #include <ui/Fence.h>
+#include <ui/Region.h>
 
+#include <gui/IProducerListener.h>
 #include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
 #include <gui/GLConsumer.h>
@@ -39,7 +42,8 @@ namespace android {
 Surface::Surface(
         const sp<IGraphicBufferProducer>& bufferProducer,
         bool controlledByApp)
-    : mGraphicBufferProducer(bufferProducer)
+    : mGraphicBufferProducer(bufferProducer),
+      mGenerationNumber(0)
 {
     // Initialize the ANativeWindow function pointers.
     ANativeWindow::setSwapInterval  = hook_setSwapInterval;
@@ -62,9 +66,11 @@ Surface::Surface(
     mReqFormat = 0;
     mReqUsage = 0;
     mTimestamp = NATIVE_WINDOW_TIMESTAMP_AUTO;
+    mDataSpace = HAL_DATASPACE_UNKNOWN;
     mCrop.clear();
     mScalingMode = NATIVE_WINDOW_SCALING_MODE_FREEZE;
     mTransform = 0;
+    mStickyTransform = 0;
     mDefaultWidth = 0;
     mDefaultHeight = 0;
     mUserWidth = 0;
@@ -84,6 +90,29 @@ Surface::~Surface() {
 
 sp<IGraphicBufferProducer> Surface::getIGraphicBufferProducer() const {
     return mGraphicBufferProducer;
+}
+
+void Surface::setSidebandStream(const sp<NativeHandle>& stream) {
+    mGraphicBufferProducer->setSidebandStream(stream);
+}
+
+void Surface::allocateBuffers() {
+    uint32_t reqWidth = mReqWidth ? mReqWidth : mUserWidth;
+    uint32_t reqHeight = mReqHeight ? mReqHeight : mUserHeight;
+    mGraphicBufferProducer->allocateBuffers(mSwapIntervalZero, reqWidth,
+            reqHeight, mReqFormat, mReqUsage);
+}
+
+status_t Surface::setGenerationNumber(uint32_t generation) {
+    status_t result = mGraphicBufferProducer->setGenerationNumber(generation);
+    if (result == NO_ERROR) {
+        mGenerationNumber = generation;
+    }
+    return result;
+}
+
+String8 Surface::getConsumerName() const {
+    return mGraphicBufferProducer->getConsumerName();
 }
 
 int Surface::hook_setSwapInterval(ANativeWindow* window, int interval) {
@@ -178,19 +207,38 @@ int Surface::setSwapInterval(int interval) {
 int Surface::dequeueBuffer(android_native_buffer_t** buffer, int* fenceFd) {
     ATRACE_CALL();
     ALOGV("Surface::dequeueBuffer");
-    Mutex::Autolock lock(mMutex);
+
+    uint32_t reqWidth;
+    uint32_t reqHeight;
+    bool swapIntervalZero;
+    PixelFormat reqFormat;
+    uint32_t reqUsage;
+
+    {
+        Mutex::Autolock lock(mMutex);
+
+        reqWidth = mReqWidth ? mReqWidth : mUserWidth;
+        reqHeight = mReqHeight ? mReqHeight : mUserHeight;
+
+        swapIntervalZero = mSwapIntervalZero;
+        reqFormat = mReqFormat;
+        reqUsage = mReqUsage;
+    } // Drop the lock so that we can still touch the Surface while blocking in IGBP::dequeueBuffer
+
     int buf = -1;
-    int reqW = mReqWidth ? mReqWidth : mUserWidth;
-    int reqH = mReqHeight ? mReqHeight : mUserHeight;
     sp<Fence> fence;
-    status_t result = mGraphicBufferProducer->dequeueBuffer(&buf, &fence, mSwapIntervalZero,
-            reqW, reqH, mReqFormat, mReqUsage);
+    status_t result = mGraphicBufferProducer->dequeueBuffer(&buf, &fence, swapIntervalZero,
+            reqWidth, reqHeight, reqFormat, reqUsage);
+
     if (result < 0) {
-        ALOGV("dequeueBuffer: IGraphicBufferProducer::dequeueBuffer(%d, %d, %d, %d)"
-             "failed: %d", mReqWidth, mReqHeight, mReqFormat, mReqUsage,
-             result);
+        ALOGV("dequeueBuffer: IGraphicBufferProducer::dequeueBuffer(%d, %d, %d, %d, %d)"
+             "failed: %d", swapIntervalZero, reqWidth, reqHeight, reqFormat,
+             reqUsage, result);
         return result;
     }
+
+    Mutex::Autolock lock(mMutex);
+
     sp<GraphicBuffer>& gbuf(mSlots[buf].buffer);
 
     // this should never happen
@@ -204,6 +252,7 @@ int Surface::dequeueBuffer(android_native_buffer_t** buffer, int* fenceFd) {
         result = mGraphicBufferProducer->requestBuffer(buf, &gbuf);
         if (result != NO_ERROR) {
             ALOGE("dequeueBuffer: IGraphicBufferProducer::requestBuffer failed: %d", result);
+            mGraphicBufferProducer->cancelBuffer(buf, fence);
             return result;
         }
     }
@@ -231,6 +280,9 @@ int Surface::cancelBuffer(android_native_buffer_t* buffer,
     Mutex::Autolock lock(mMutex);
     int i = getSlotFromBufferLocked(buffer);
     if (i < 0) {
+        if (fenceFd >= 0) {
+            close(fenceFd);
+        }
         return i;
     }
     sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : Fence::NO_FENCE);
@@ -240,7 +292,6 @@ int Surface::cancelBuffer(android_native_buffer_t* buffer,
 
 int Surface::getSlotFromBufferLocked(
         android_native_buffer_t* buffer) const {
-    bool dumpedState = false;
     for (int i = 0; i < NUM_BUFFER_SLOTS; i++) {
         if (mSlots[i].buffer != NULL &&
                 mSlots[i].buffer->handle == buffer->handle) {
@@ -251,7 +302,7 @@ int Surface::getSlotFromBufferLocked(
     return BAD_VALUE;
 }
 
-int Surface::lockBuffer_DEPRECATED(android_native_buffer_t* buffer) {
+int Surface::lockBuffer_DEPRECATED(android_native_buffer_t* buffer __attribute__((unused))) {
     ALOGV("Surface::lockBuffer");
     Mutex::Autolock lock(mMutex);
     return OK;
@@ -273,6 +324,9 @@ int Surface::queueBuffer(android_native_buffer_t* buffer, int fenceFd) {
     }
     int i = getSlotFromBufferLocked(buffer);
     if (i < 0) {
+        if (fenceFd >= 0) {
+            close(fenceFd);
+        }
         return i;
     }
 
@@ -284,16 +338,92 @@ int Surface::queueBuffer(android_native_buffer_t* buffer, int fenceFd) {
     sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : Fence::NO_FENCE);
     IGraphicBufferProducer::QueueBufferOutput output;
     IGraphicBufferProducer::QueueBufferInput input(timestamp, isAutoTimestamp,
-            crop, mScalingMode, mTransform, mSwapIntervalZero, fence);
+            mDataSpace, crop, mScalingMode, mTransform ^ mStickyTransform,
+            mSwapIntervalZero, fence, mStickyTransform);
+
+    if (mConnectedToCpu || mDirtyRegion.bounds() == Rect::INVALID_RECT) {
+        input.setSurfaceDamage(Region::INVALID_REGION);
+    } else {
+        // Here we do two things:
+        // 1) The surface damage was specified using the OpenGL ES convention of
+        //    the origin being in the bottom-left corner. Here we flip to the
+        //    convention that the rest of the system uses (top-left corner) by
+        //    subtracting all top/bottom coordinates from the buffer height.
+        // 2) If the buffer is coming in rotated (for example, because the EGL
+        //    implementation is reacting to the transform hint coming back from
+        //    SurfaceFlinger), the surface damage needs to be rotated the
+        //    opposite direction, since it was generated assuming an unrotated
+        //    buffer (the app doesn't know that the EGL implementation is
+        //    reacting to the transform hint behind its back). The
+        //    transformations in the switch statement below apply those
+        //    complementary rotations (e.g., if 90 degrees, rotate 270 degrees).
+
+        int width = buffer->width;
+        int height = buffer->height;
+        bool rotated90 = (mTransform ^ mStickyTransform) &
+                NATIVE_WINDOW_TRANSFORM_ROT_90;
+        if (rotated90) {
+            std::swap(width, height);
+        }
+
+        Region flippedRegion;
+        for (auto rect : mDirtyRegion) {
+            int left = rect.left;
+            int right = rect.right;
+            int top = height - rect.bottom; // Flip from OpenGL convention
+            int bottom = height - rect.top; // Flip from OpenGL convention
+            switch (mTransform ^ mStickyTransform) {
+                case NATIVE_WINDOW_TRANSFORM_ROT_90: {
+                    // Rotate 270 degrees
+                    Rect flippedRect{top, width - right, bottom, width - left};
+                    flippedRegion.orSelf(flippedRect);
+                    break;
+                }
+                case NATIVE_WINDOW_TRANSFORM_ROT_180: {
+                    // Rotate 180 degrees
+                    Rect flippedRect{width - right, height - bottom,
+                            width - left, height - top};
+                    flippedRegion.orSelf(flippedRect);
+                    break;
+                }
+                case NATIVE_WINDOW_TRANSFORM_ROT_270: {
+                    // Rotate 90 degrees
+                    Rect flippedRect{height - bottom, left,
+                            height - top, right};
+                    flippedRegion.orSelf(flippedRect);
+                    break;
+                }
+                default: {
+                    Rect flippedRect{left, top, right, bottom};
+                    flippedRegion.orSelf(flippedRect);
+                    break;
+                }
+            }
+        }
+
+        input.setSurfaceDamage(flippedRegion);
+    }
+
     status_t err = mGraphicBufferProducer->queueBuffer(i, input, &output);
     if (err != OK)  {
         ALOGE("queueBuffer: error queuing buffer to SurfaceTexture, %d", err);
     }
     uint32_t numPendingBuffers = 0;
-    output.deflate(&mDefaultWidth, &mDefaultHeight, &mTransformHint,
+    uint32_t hint = 0;
+    output.deflate(&mDefaultWidth, &mDefaultHeight, &hint,
             &numPendingBuffers);
 
+    // Disable transform hint if sticky transform is set.
+    if (mStickyTransform == 0) {
+        mTransformHint = hint;
+    }
+
     mConsumerRunningBehind = (numPendingBuffers >= 2);
+
+    if (!mConnectedToCpu) {
+        // Clear surface damage back to full-buffer
+        mDirtyRegion = Region::INVALID_REGION;
+    }
 
     return err;
 }
@@ -306,7 +436,7 @@ int Surface::query(int what, int* value) const {
         switch (what) {
             case NATIVE_WINDOW_FORMAT:
                 if (mReqFormat) {
-                    *value = mReqFormat;
+                    *value = static_cast<int>(mReqFormat);
                     return NO_ERROR;
                 }
                 break;
@@ -324,13 +454,15 @@ int Surface::query(int what, int* value) const {
                 *value = NATIVE_WINDOW_SURFACE;
                 return NO_ERROR;
             case NATIVE_WINDOW_DEFAULT_WIDTH:
-                *value = mUserWidth ? mUserWidth : mDefaultWidth;
+                *value = static_cast<int>(
+                        mUserWidth ? mUserWidth : mDefaultWidth);
                 return NO_ERROR;
             case NATIVE_WINDOW_DEFAULT_HEIGHT:
-                *value = mUserHeight ? mUserHeight : mDefaultHeight;
+                *value = static_cast<int>(
+                        mUserHeight ? mUserHeight : mDefaultHeight);
                 return NO_ERROR;
             case NATIVE_WINDOW_TRANSFORM_HINT:
-                *value = mTransformHint;
+                *value = static_cast<int>(mTransformHint);
                 return NO_ERROR;
             case NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND: {
                 status_t err = NO_ERROR;
@@ -374,6 +506,9 @@ int Surface::perform(int operation, va_list args)
     case NATIVE_WINDOW_SET_BUFFERS_TRANSFORM:
         res = dispatchSetBuffersTransform(args);
         break;
+    case NATIVE_WINDOW_SET_BUFFERS_STICKY_TRANSFORM:
+        res = dispatchSetBuffersStickyTransform(args);
+        break;
     case NATIVE_WINDOW_SET_BUFFERS_TIMESTAMP:
         res = dispatchSetBuffersTimestamp(args);
         break;
@@ -401,6 +536,15 @@ int Surface::perform(int operation, va_list args)
     case NATIVE_WINDOW_API_DISCONNECT:
         res = dispatchDisconnect(args);
         break;
+    case NATIVE_WINDOW_SET_SIDEBAND_STREAM:
+        res = dispatchSetSidebandStream(args);
+        break;
+    case NATIVE_WINDOW_SET_BUFFERS_DATASPACE:
+        res = dispatchSetBuffersDataSpace(args);
+        break;
+    case NATIVE_WINDOW_SET_SURFACE_DAMAGE:
+        res = dispatchSetSurfaceDamage(args);
+        break;
     default:
         res = NAME_NOT_FOUND;
         break;
@@ -420,7 +564,7 @@ int Surface::dispatchDisconnect(va_list args) {
 
 int Surface::dispatchSetUsage(va_list args) {
     int usage = va_arg(args, int);
-    return setUsage(usage);
+    return setUsage(static_cast<uint32_t>(usage));
 }
 
 int Surface::dispatchSetCrop(va_list args) {
@@ -430,45 +574,50 @@ int Surface::dispatchSetCrop(va_list args) {
 
 int Surface::dispatchSetBufferCount(va_list args) {
     size_t bufferCount = va_arg(args, size_t);
-    return setBufferCount(bufferCount);
+    return setBufferCount(static_cast<int32_t>(bufferCount));
 }
 
 int Surface::dispatchSetBuffersGeometry(va_list args) {
-    int w = va_arg(args, int);
-    int h = va_arg(args, int);
-    int f = va_arg(args, int);
-    int err = setBuffersDimensions(w, h);
+    uint32_t width = va_arg(args, uint32_t);
+    uint32_t height = va_arg(args, uint32_t);
+    PixelFormat format = va_arg(args, PixelFormat);
+    int err = setBuffersDimensions(width, height);
     if (err != 0) {
         return err;
     }
-    return setBuffersFormat(f);
+    return setBuffersFormat(format);
 }
 
 int Surface::dispatchSetBuffersDimensions(va_list args) {
-    int w = va_arg(args, int);
-    int h = va_arg(args, int);
-    return setBuffersDimensions(w, h);
+    uint32_t width = va_arg(args, uint32_t);
+    uint32_t height = va_arg(args, uint32_t);
+    return setBuffersDimensions(width, height);
 }
 
 int Surface::dispatchSetBuffersUserDimensions(va_list args) {
-    int w = va_arg(args, int);
-    int h = va_arg(args, int);
-    return setBuffersUserDimensions(w, h);
+    uint32_t width = va_arg(args, uint32_t);
+    uint32_t height = va_arg(args, uint32_t);
+    return setBuffersUserDimensions(width, height);
 }
 
 int Surface::dispatchSetBuffersFormat(va_list args) {
-    int f = va_arg(args, int);
-    return setBuffersFormat(f);
+    PixelFormat format = va_arg(args, PixelFormat);
+    return setBuffersFormat(format);
 }
 
 int Surface::dispatchSetScalingMode(va_list args) {
-    int m = va_arg(args, int);
-    return setScalingMode(m);
+    int mode = va_arg(args, int);
+    return setScalingMode(mode);
 }
 
 int Surface::dispatchSetBuffersTransform(va_list args) {
-    int transform = va_arg(args, int);
+    uint32_t transform = va_arg(args, uint32_t);
     return setBuffersTransform(transform);
+}
+
+int Surface::dispatchSetBuffersStickyTransform(va_list args) {
+    uint32_t transform = va_arg(args, uint32_t);
+    return setBuffersStickyTransform(transform);
 }
 
 int Surface::dispatchSetBuffersTimestamp(va_list args) {
@@ -482,27 +631,63 @@ int Surface::dispatchLock(va_list args) {
     return lock(outBuffer, inOutDirtyBounds);
 }
 
-int Surface::dispatchUnlockAndPost(va_list args) {
+int Surface::dispatchUnlockAndPost(va_list args __attribute__((unused))) {
     return unlockAndPost();
 }
 
+int Surface::dispatchSetSidebandStream(va_list args) {
+    native_handle_t* sH = va_arg(args, native_handle_t*);
+    sp<NativeHandle> sidebandHandle = NativeHandle::create(sH, false);
+    setSidebandStream(sidebandHandle);
+    return OK;
+}
+
+int Surface::dispatchSetBuffersDataSpace(va_list args) {
+    android_dataspace dataspace =
+            static_cast<android_dataspace>(va_arg(args, int));
+    return setBuffersDataSpace(dataspace);
+}
+
+int Surface::dispatchSetSurfaceDamage(va_list args) {
+    android_native_rect_t* rects = va_arg(args, android_native_rect_t*);
+    size_t numRects = va_arg(args, size_t);
+    setSurfaceDamage(rects, numRects);
+    return NO_ERROR;
+}
 
 int Surface::connect(int api) {
+    static sp<IProducerListener> listener = new DummyProducerListener();
+    return connect(api, listener);
+}
+
+int Surface::connect(int api, const sp<IProducerListener>& listener) {
     ATRACE_CALL();
     ALOGV("Surface::connect");
-    static sp<BBinder> sLife = new BBinder();
     Mutex::Autolock lock(mMutex);
     IGraphicBufferProducer::QueueBufferOutput output;
-    int err = mGraphicBufferProducer->connect(sLife, api, mProducerControlledByApp, &output);
+    int err = mGraphicBufferProducer->connect(listener, api, mProducerControlledByApp, &output);
     if (err == NO_ERROR) {
         uint32_t numPendingBuffers = 0;
-        output.deflate(&mDefaultWidth, &mDefaultHeight, &mTransformHint,
+        uint32_t hint = 0;
+        output.deflate(&mDefaultWidth, &mDefaultHeight, &hint,
                 &numPendingBuffers);
+
+        // Disable transform hint if sticky transform is set.
+        if (mStickyTransform == 0) {
+            mTransformHint = hint;
+        }
+
         mConsumerRunningBehind = (numPendingBuffers >= 2);
     }
     if (!err && api == NATIVE_WINDOW_API_CPU) {
         mConnectedToCpu = true;
+        // Clear the dirty region in case we're switching from a non-CPU API
+        mDirtyRegion.clear();
+    } else if (!err) {
+        // Initialize the dirty region for tracking surface damage
+        mDirtyRegion = Region::INVALID_REGION;
     }
+
     return err;
 }
 
@@ -521,11 +706,65 @@ int Surface::disconnect(int api) {
         mCrop.clear();
         mScalingMode = NATIVE_WINDOW_SCALING_MODE_FREEZE;
         mTransform = 0;
+        mStickyTransform = 0;
+
         if (api == NATIVE_WINDOW_API_CPU) {
             mConnectedToCpu = false;
         }
     }
     return err;
+}
+
+int Surface::detachNextBuffer(sp<GraphicBuffer>* outBuffer,
+        sp<Fence>* outFence) {
+    ATRACE_CALL();
+    ALOGV("Surface::detachNextBuffer");
+
+    if (outBuffer == NULL || outFence == NULL) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock lock(mMutex);
+
+    sp<GraphicBuffer> buffer(NULL);
+    sp<Fence> fence(NULL);
+    status_t result = mGraphicBufferProducer->detachNextBuffer(
+            &buffer, &fence);
+    if (result != NO_ERROR) {
+        return result;
+    }
+
+    *outBuffer = buffer;
+    if (fence != NULL && fence->isValid()) {
+        *outFence = fence;
+    } else {
+        *outFence = Fence::NO_FENCE;
+    }
+
+    return NO_ERROR;
+}
+
+int Surface::attachBuffer(ANativeWindowBuffer* buffer)
+{
+    ATRACE_CALL();
+    ALOGV("Surface::attachBuffer");
+
+    Mutex::Autolock lock(mMutex);
+
+    sp<GraphicBuffer> graphicBuffer(static_cast<GraphicBuffer*>(buffer));
+    uint32_t priorGeneration = graphicBuffer->mGenerationNumber;
+    graphicBuffer->mGenerationNumber = mGenerationNumber;
+    int32_t attachedSlot = -1;
+    status_t result = mGraphicBufferProducer->attachBuffer(
+            &attachedSlot, graphicBuffer);
+    if (result != NO_ERROR) {
+        ALOGE("attachBuffer: IGraphicBufferProducer call failed (%d)", result);
+        graphicBuffer->mGenerationNumber = priorGeneration;
+        return result;
+    }
+    mSlots[attachedSlot].buffer = graphicBuffer;
+
+    return NO_ERROR;
 }
 
 int Surface::setUsage(uint32_t reqUsage)
@@ -572,46 +811,37 @@ int Surface::setBufferCount(int bufferCount)
     return err;
 }
 
-int Surface::setBuffersDimensions(int w, int h)
+int Surface::setBuffersDimensions(uint32_t width, uint32_t height)
 {
     ATRACE_CALL();
     ALOGV("Surface::setBuffersDimensions");
 
-    if (w<0 || h<0)
-        return BAD_VALUE;
-
-    if ((w && !h) || (!w && h))
+    if ((width && !height) || (!width && height))
         return BAD_VALUE;
 
     Mutex::Autolock lock(mMutex);
-    mReqWidth = w;
-    mReqHeight = h;
+    mReqWidth = width;
+    mReqHeight = height;
     return NO_ERROR;
 }
 
-int Surface::setBuffersUserDimensions(int w, int h)
+int Surface::setBuffersUserDimensions(uint32_t width, uint32_t height)
 {
     ATRACE_CALL();
     ALOGV("Surface::setBuffersUserDimensions");
 
-    if (w<0 || h<0)
-        return BAD_VALUE;
-
-    if ((w && !h) || (!w && h))
+    if ((width && !height) || (!width && height))
         return BAD_VALUE;
 
     Mutex::Autolock lock(mMutex);
-    mUserWidth = w;
-    mUserHeight = h;
+    mUserWidth = width;
+    mUserHeight = height;
     return NO_ERROR;
 }
 
-int Surface::setBuffersFormat(int format)
+int Surface::setBuffersFormat(PixelFormat format)
 {
     ALOGV("Surface::setBuffersFormat");
-
-    if (format<0)
-        return BAD_VALUE;
 
     Mutex::Autolock lock(mMutex);
     mReqFormat = format;
@@ -638,12 +868,21 @@ int Surface::setScalingMode(int mode)
     return NO_ERROR;
 }
 
-int Surface::setBuffersTransform(int transform)
+int Surface::setBuffersTransform(uint32_t transform)
 {
     ATRACE_CALL();
     ALOGV("Surface::setBuffersTransform");
     Mutex::Autolock lock(mMutex);
     mTransform = transform;
+    return NO_ERROR;
+}
+
+int Surface::setBuffersStickyTransform(uint32_t transform)
+{
+    ATRACE_CALL();
+    ALOGV("Surface::setBuffersStickyTransform");
+    Mutex::Autolock lock(mMutex);
+    mStickyTransform = transform;
     return NO_ERROR;
 }
 
@@ -655,9 +894,38 @@ int Surface::setBuffersTimestamp(int64_t timestamp)
     return NO_ERROR;
 }
 
+int Surface::setBuffersDataSpace(android_dataspace dataSpace)
+{
+    ALOGV("Surface::setBuffersDataSpace");
+    Mutex::Autolock lock(mMutex);
+    mDataSpace = dataSpace;
+    return NO_ERROR;
+}
+
 void Surface::freeAllBuffers() {
     for (int i = 0; i < NUM_BUFFER_SLOTS; i++) {
         mSlots[i].buffer = 0;
+    }
+}
+
+void Surface::setSurfaceDamage(android_native_rect_t* rects, size_t numRects) {
+    ATRACE_CALL();
+    ALOGV("Surface::setSurfaceDamage");
+    Mutex::Autolock lock(mMutex);
+
+    if (mConnectedToCpu || numRects == 0) {
+        mDirtyRegion = Region::INVALID_REGION;
+        return;
+    }
+
+    mDirtyRegion.clear();
+    for (size_t r = 0; r < numRects; ++r) {
+        // We intentionally flip top and bottom here, since because they're
+        // specified with a bottom-left origin, top > bottom, which fails
+        // validation in the Region class. We will fix this up when we flip to a
+        // top-left origin in queueBuffer.
+        Rect rect(rects[r].left, rects[r].bottom, rects[r].right, rects[r].top);
+        mDirtyRegion.orSelf(rect);
     }
 }
 
@@ -672,30 +940,34 @@ static status_t copyBlt(
     // src and dst with, height and format must be identical. no verification
     // is done here.
     status_t err;
-    uint8_t const * src_bits = NULL;
-    err = src->lock(GRALLOC_USAGE_SW_READ_OFTEN, reg.bounds(), (void**)&src_bits);
+    uint8_t* src_bits = NULL;
+    err = src->lock(GRALLOC_USAGE_SW_READ_OFTEN, reg.bounds(),
+            reinterpret_cast<void**>(&src_bits));
     ALOGE_IF(err, "error locking src buffer %s", strerror(-err));
 
     uint8_t* dst_bits = NULL;
-    err = dst->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, reg.bounds(), (void**)&dst_bits);
+    err = dst->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, reg.bounds(),
+            reinterpret_cast<void**>(&dst_bits));
     ALOGE_IF(err, "error locking dst buffer %s", strerror(-err));
 
     Region::const_iterator head(reg.begin());
     Region::const_iterator tail(reg.end());
     if (head != tail && src_bits && dst_bits) {
         const size_t bpp = bytesPerPixel(src->format);
-        const size_t dbpr = dst->stride * bpp;
-        const size_t sbpr = src->stride * bpp;
+        const size_t dbpr = static_cast<uint32_t>(dst->stride) * bpp;
+        const size_t sbpr = static_cast<uint32_t>(src->stride) * bpp;
 
         while (head != tail) {
             const Rect& r(*head++);
-            ssize_t h = r.height();
+            int32_t h = r.height();
             if (h <= 0) continue;
-            size_t size = r.width() * bpp;
-            uint8_t const * s = src_bits + (r.left + src->stride * r.top) * bpp;
-            uint8_t       * d = dst_bits + (r.left + dst->stride * r.top) * bpp;
+            size_t size = static_cast<uint32_t>(r.width()) * bpp;
+            uint8_t const * s = src_bits +
+                    static_cast<uint32_t>(r.left + src->stride * r.top) * bpp;
+            uint8_t       * d = dst_bits +
+                    static_cast<uint32_t>(r.left + dst->stride * r.top) * bpp;
             if (dbpr==sbpr && size==sbpr) {
-                size *= h;
+                size *= static_cast<size_t>(h);
                 h = 1;
             }
             do {
@@ -740,15 +1012,6 @@ status_t Surface::lock(
     ALOGE_IF(err, "dequeueBuffer failed (%s)", strerror(-err));
     if (err == NO_ERROR) {
         sp<GraphicBuffer> backBuffer(GraphicBuffer::getSelf(out));
-        sp<Fence> fence(new Fence(fenceFd));
-
-        err = fence->waitForever("Surface::lock");
-        if (err != OK) {
-            ALOGE("Fence::wait failed (%s)", strerror(-err));
-            cancelBuffer(out, fenceFd);
-            return err;
-        }
-
         const Rect bounds(backBuffer->width, backBuffer->height);
 
         Region newDirtyRegion;
@@ -799,9 +1062,9 @@ status_t Surface::lock(
         }
 
         void* vaddr;
-        status_t res = backBuffer->lock(
+        status_t res = backBuffer->lockAsync(
                 GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN,
-                newDirtyRegion.bounds(), &vaddr);
+                newDirtyRegion.bounds(), &vaddr, fenceFd);
 
         ALOGW_IF(res, "failed locking buffer (handle = %p)",
                 backBuffer->handle);
@@ -827,10 +1090,11 @@ status_t Surface::unlockAndPost()
         return INVALID_OPERATION;
     }
 
-    status_t err = mLockedBuffer->unlock();
+    int fd = -1;
+    status_t err = mLockedBuffer->unlockAsync(&fd);
     ALOGE_IF(err, "failed unlocking buffer (%p)", mLockedBuffer->handle);
 
-    err = queueBuffer(mLockedBuffer.get(), -1);
+    err = queueBuffer(mLockedBuffer.get(), fd);
     ALOGE_IF(err, "queueBuffer (handle=%p) failed (%s)",
             mLockedBuffer->handle, strerror(-err));
 

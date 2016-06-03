@@ -22,6 +22,7 @@
 #include <sys/types.h>
 
 #include <GLES2/gl2.h>
+#include <Transform.h>
 
 #include "RenderEngine.h"
 #include "ProgramCache.h"
@@ -64,19 +65,18 @@ protected:
     virtual ~GLES20RenderEngine();
 
     virtual void dump(String8& result);
-    virtual void setViewportAndProjection(size_t vpw, size_t vph, size_t w, size_t h, bool yswap);
+    virtual void setViewportAndProjection(size_t vpw, size_t vph,
+            Rect sourceCrop, size_t hwh, bool yswap, Transform::orientation_flags rotation);
     virtual void setupLayerBlending(bool premultipliedAlpha, bool opaque, int alpha);
     virtual void setupDimLayerBlending(int alpha);
     virtual void setupLayerTexturing(const Texture& texture);
     virtual void setupLayerBlackedOut();
     virtual void setupFillWithColor(float r, float g, float b, float a);
+    virtual mat4 setupColorTransform(const mat4& colorTransform);
     virtual void disableTexturing();
     virtual void disableBlending();
 
     virtual void drawMesh(const Mesh& mesh);
-
-    virtual void beginGroup(const mat4& colorTransform);
-    virtual void endGroup();
 
     virtual size_t getMaxTextureSize() const;
     virtual size_t getMaxViewportDims() const;

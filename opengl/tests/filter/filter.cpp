@@ -5,8 +5,8 @@
 #include <GLES/gl.h>
 #include <GLES/glext.h>
 
-#include <ui/FramebufferNativeWindow.h>
-#include "EGLUtils.h"
+#include <WindowSurface.h>
+#include <EGLUtils.h>
 
 using namespace android;
 
@@ -40,8 +40,10 @@ int main(int argc, char** argv)
      EGLDisplay dpy;
 
      EGLNativeWindowType window = 0;
+     WindowSurface* windowSurface = NULL;
      if (!usePbuffer) {
-         window = android_createDisplaySurface();
+         windowSurface = new WindowSurface();
+         window = windowSurface->getSurface();
      }
      
      dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -138,11 +140,12 @@ int main(int argc, char** argv)
 
      //glDrawTexiOES(0, 0, 0, dim, dim);
      
+     const GLfloat fdim = dim;
      const GLfloat vertices[4][2] = {
-             { 0,    0   },
-             { 0,    dim },
-             { dim,  dim },
-             { dim,  0   }
+             { 0,     0    },
+             { 0,     fdim },
+             { fdim,  fdim },
+             { fdim,  0    }
      };
 
      const GLfloat texCoords[4][2] = {
@@ -186,5 +189,6 @@ int main(int argc, char** argv)
      }
 
      eglTerminate(dpy);
+     delete windowSurface;
      return 0;
 }

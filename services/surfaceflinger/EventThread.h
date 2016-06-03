@@ -51,6 +51,7 @@ public:
     virtual ~VSyncSource() {}
     virtual void setVSyncEnabled(bool enable) = 0;
     virtual void setCallback(const sp<Callback>& callback) = 0;
+    virtual void setPhaseOffset(nsecs_t phaseOffset) = 0;
 };
 
 class EventThread : public Thread, private VSyncSource::Callback {
@@ -97,6 +98,9 @@ public:
             DisplayEventReceiver::Event* event);
 
     void dump(String8& result) const;
+    void sendVsyncHintOff();
+
+    void setPhaseOffset(nsecs_t phaseOffset);
 
 private:
     virtual bool        threadLoop();
@@ -107,6 +111,7 @@ private:
     void removeDisplayEventConnection(const wp<Connection>& connection);
     void enableVSyncLocked();
     void disableVSyncLocked();
+    void sendVsyncHintOnLocked();
 
     // constants
     sp<VSyncSource> mVSyncSource;
@@ -124,6 +129,9 @@ private:
 
     // for debugging
     bool mDebugVsyncEnabled;
+
+    bool mVsyncHintSent;
+    timer_t mTimerId;
 };
 
 // ---------------------------------------------------------------------------

@@ -93,7 +93,7 @@ status_t Client::onTransact(
      const int pid = ipc->getCallingPid();
      const int uid = ipc->getCallingUid();
      const int self_pid = getpid();
-     if (CC_UNLIKELY(pid != self_pid && uid != AID_GRAPHICS && uid != 0)) {
+     if (CC_UNLIKELY(pid != self_pid && uid != AID_GRAPHICS && uid != AID_SYSTEM && uid != 0)) {
          // we're called from a different process, do the real check
          if (!PermissionCache::checkCallingPermission(sAccessSurfaceFlinger))
          {
@@ -153,6 +153,24 @@ status_t Client::createSurface(
 
 status_t Client::destroySurface(const sp<IBinder>& handle) {
     return mFlinger->onLayerRemoved(this, handle);
+}
+
+status_t Client::clearLayerFrameStats(const sp<IBinder>& handle) const {
+    sp<Layer> layer = getLayerUser(handle);
+    if (layer == NULL) {
+        return NAME_NOT_FOUND;
+    }
+    layer->clearFrameStats();
+    return NO_ERROR;
+}
+
+status_t Client::getLayerFrameStats(const sp<IBinder>& handle, FrameStats* outStats) const {
+    sp<Layer> layer = getLayerUser(handle);
+    if (layer == NULL) {
+        return NAME_NOT_FOUND;
+    }
+    layer->getFrameStats(outStats);
+    return NO_ERROR;
 }
 
 // ---------------------------------------------------------------------------

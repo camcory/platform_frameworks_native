@@ -17,11 +17,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/sendfile.h>
 #include <time.h>
 #include <zlib.h>
@@ -33,13 +35,14 @@
 #include <cutils/properties.h>
 
 #include <utils/String8.h>
+#include <utils/Timers.h>
 #include <utils/Trace.h>
 
 using namespace android;
 
 #define NELEM(x) ((int) (sizeof(x) / sizeof((x)[0])))
 
-enum { MAX_SYS_FILES = 8 };
+enum { MAX_SYS_FILES = 10 };
 
 const char* k_traceTagsProperty = "debug.atrace.tags.enableflags";
 const char* k_traceAppCmdlineProperty = "debug.atrace.app_cmdlines";
@@ -76,16 +79,23 @@ static const TracingCategory k_categories[] = {
     { "webview",    "WebView",          ATRACE_TAG_WEBVIEW, { } },
     { "wm",         "Window Manager",   ATRACE_TAG_WINDOW_MANAGER, { } },
     { "am",         "Activity Manager", ATRACE_TAG_ACTIVITY_MANAGER, { } },
+    { "sm",         "Sync Manager",     ATRACE_TAG_SYNC_MANAGER, { } },
     { "audio",      "Audio",            ATRACE_TAG_AUDIO, { } },
     { "video",      "Video",            ATRACE_TAG_VIDEO, { } },
     { "camera",     "Camera",           ATRACE_TAG_CAMERA, { } },
     { "hal",        "Hardware Modules", ATRACE_TAG_HAL, { } },
+    { "app",        "Application",      ATRACE_TAG_APP, { } },
     { "res",        "Resource Loading", ATRACE_TAG_RESOURCES, { } },
     { "dalvik",     "Dalvik VM",        ATRACE_TAG_DALVIK, { } },
     { "rs",         "RenderScript",     ATRACE_TAG_RS, { } },
+    { "bionic",     "Bionic C Library", ATRACE_TAG_BIONIC, { } },
+    { "power",      "Power Management", ATRACE_TAG_POWER, { } },
     { "sched",      "CPU Scheduling",   0, {
         { REQ,      "/sys/kernel/debug/tracing/events/sched/sched_switch/enable" },
         { REQ,      "/sys/kernel/debug/tracing/events/sched/sched_wakeup/enable" },
+    } },
+    { "irq",        "IRQ Events",   0, {
+        { REQ,      "/sys/kernel/debug/tracing/events/irq/enable" },
     } },
     { "freq",       "CPU Frequency",    0, {
         { REQ,      "/sys/kernel/debug/tracing/events/power/cpu_frequency/enable" },
@@ -98,8 +108,14 @@ static const TracingCategory k_categories[] = {
         { REQ,      "/sys/kernel/debug/tracing/events/power/cpu_idle/enable" },
     } },
     { "disk",       "Disk I/O",         0, {
-        { REQ,      "/sys/kernel/debug/tracing/events/ext4/ext4_sync_file_enter/enable" },
-        { REQ,      "/sys/kernel/debug/tracing/events/ext4/ext4_sync_file_exit/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/f2fs/f2fs_sync_file_enter/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/f2fs/f2fs_sync_file_exit/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/f2fs/f2fs_write_begin/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/f2fs/f2fs_write_end/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/ext4/ext4_da_write_begin/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/ext4/ext4_da_write_end/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/ext4/ext4_sync_file_enter/enable" },
+        { OPT,      "/sys/kernel/debug/tracing/events/ext4/ext4_sync_file_exit/enable" },
         { REQ,      "/sys/kernel/debug/tracing/events/block/block_rq_issue/enable" },
         { REQ,      "/sys/kernel/debug/tracing/events/block/block_rq_complete/enable" },
     } },
@@ -114,6 +130,15 @@ static const TracingCategory k_categories[] = {
     } },
     { "workq",      "Kernel Workqueues", 0, {
         { REQ,      "/sys/kernel/debug/tracing/events/workqueue/enable" },
+    } },
+    { "memreclaim", "Kernel Memory Reclaim", 0, {
+        { REQ,      "/sys/kernel/debug/tracing/events/vmscan/mm_vmscan_direct_reclaim_begin/enable" },
+        { REQ,      "/sys/kernel/debug/tracing/events/vmscan/mm_vmscan_direct_reclaim_end/enable" },
+        { REQ,      "/sys/kernel/debug/tracing/events/vmscan/mm_vmscan_kswapd_wake/enable" },
+        { REQ,      "/sys/kernel/debug/tracing/events/vmscan/mm_vmscan_kswapd_sleep/enable" },
+    } },
+    { "regulators",  "Voltage and Current Regulators", 0, {
+        { REQ,      "/sys/kernel/debug/tracing/events/regulator/enable" },
     } },
 };
 
@@ -170,6 +195,9 @@ static const char* k_tracingOnPath =
 
 static const char* k_tracePath =
     "/sys/kernel/debug/tracing/trace";
+
+static const char* k_traceMarkerPath =
+    "/sys/kernel/debug/tracing/trace_marker";
 
 // Check whether a file exists.
 static bool fileExists(const char* filename) {
@@ -231,6 +259,32 @@ static bool writeStr(const char* filename, const char* str)
 static bool appendStr(const char* filename, const char* str)
 {
     return _writeStr(filename, str, O_APPEND|O_WRONLY);
+}
+
+static void writeClockSyncMarker()
+{
+  char buffer[128];
+  int len = 0;
+  int fd = open(k_traceMarkerPath, O_WRONLY);
+  if (fd == -1) {
+      fprintf(stderr, "error opening %s: %s (%d)\n", k_traceMarkerPath,
+              strerror(errno), errno);
+      return;
+  }
+  float now_in_seconds = systemTime(CLOCK_MONOTONIC) / 1000000000.0f;
+
+  len = snprintf(buffer, 128, "trace_event_clock_sync: parent_ts=%f\n", now_in_seconds);
+  if (write(fd, buffer, len) != len) {
+      fprintf(stderr, "error writing clock sync marker %s (%d)\n", strerror(errno), errno);
+  }
+
+  int64_t realtime_in_ms = systemTime(CLOCK_REALTIME) / 1000000;
+  len = snprintf(buffer, 128, "trace_event_clock_sync: realtime_ts=%" PRId64 "\n", realtime_in_ms);
+  if (write(fd, buffer, len) != len) {
+      fprintf(stderr, "error writing clock sync marker %s (%d)\n", strerror(errno), errno);
+  }
+
+  close(fd);
 }
 
 // Enable or disable a kernel option by writing a "1" or a "0" into a /sys
@@ -321,11 +375,56 @@ static bool setTraceBufferSizeKB(int size)
     return writeStr(k_traceBufferSizePath, str);
 }
 
+// Read the trace_clock sysfs file and return true if it matches the requested
+// value.  The trace_clock file format is:
+// local [global] counter uptime perf
+static bool isTraceClock(const char *mode)
+{
+    int fd = open(k_traceClockPath, O_RDONLY);
+    if (fd == -1) {
+        fprintf(stderr, "error opening %s: %s (%d)\n", k_traceClockPath,
+            strerror(errno), errno);
+        return false;
+    }
+
+    char buf[4097];
+    ssize_t n = read(fd, buf, 4096);
+    close(fd);
+    if (n == -1) {
+        fprintf(stderr, "error reading %s: %s (%d)\n", k_traceClockPath,
+            strerror(errno), errno);
+        return false;
+    }
+    buf[n] = '\0';
+
+    char *start = strchr(buf, '[');
+    if (start == NULL) {
+        return false;
+    }
+    start++;
+
+    char *end = strchr(start, ']');
+    if (end == NULL) {
+        return false;
+    }
+    *end = '\0';
+
+    return strcmp(mode, start) == 0;
+}
+
 // Enable or disable the kernel's use of the global clock.  Disabling the global
 // clock will result in the kernel using a per-CPU local clock.
+// Any write to the trace_clock sysfs file will reset the buffer, so only
+// update it if the requested value is not the current value.
 static bool setGlobalClockEnable(bool enable)
 {
-    return writeStr(k_traceClockPath, enable ? "global" : "local");
+    const char *clock = enable ? "global" : "local";
+
+    if (isTraceClock(clock)) {
+        return true;
+    }
+
+    return writeStr(k_traceClockPath, clock);
 }
 
 static bool setPrintTgidEnableIfPresent(bool enable)
@@ -368,7 +467,7 @@ static bool pokeBinderServices()
 static bool setTagsProperty(uint64_t tags)
 {
     char buf[64];
-    snprintf(buf, 64, "%#llx", tags);
+    snprintf(buf, 64, "%#" PRIx64, tags);
     if (property_set(k_traceTagsProperty, buf) < 0) {
         fprintf(stderr, "error setting trace tags system property\n");
         return false;
@@ -583,7 +682,7 @@ static void dumpTrace()
         uint8_t *in, *out;
         int result, flush;
 
-        bzero(&zs, sizeof(zs));
+        memset(&zs, 0, sizeof(zs));
         result = deflateInit(&zs, Z_DEFAULT_COMPRESSION);
         if (result != Z_OK) {
             fprintf(stderr, "error initializing zlib: %d\n", result);
@@ -665,7 +764,7 @@ static void dumpTrace()
     close(traceFD);
 }
 
-static void handleSignal(int signo)
+static void handleSignal(int /*signo*/)
 {
     if (!g_nohup) {
         g_traceAborted = true;
@@ -818,7 +917,7 @@ int main(int argc, char **argv)
                     g_traceOverwrite = true;
                 } else if (!strcmp(long_options[option_index].name, "async_stop")) {
                     async = true;
-                    traceStop = false;
+                    traceStart = false;
                 } else if (!strcmp(long_options[option_index].name, "async_dump")) {
                     async = true;
                     traceStart = false;
@@ -858,6 +957,7 @@ int main(int argc, char **argv)
         // another.
         ok = clearTrace();
 
+        writeClockSyncMarker();
         if (ok && !async) {
             // Sleep to allow the trace to be captured.
             struct timespec timeLeft;

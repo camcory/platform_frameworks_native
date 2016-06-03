@@ -25,8 +25,8 @@
 #include <GLES/glext.h>
 
 #include <utils/StopWatch.h>
-#include <ui/FramebufferNativeWindow.h>
-#include "EGLUtils.h"
+#include <WindowSurface.h>
+#include <EGLUtils.h>
 
 using namespace android;
 
@@ -45,7 +45,8 @@ int main(int argc, char** argv)
      EGLint w, h;
      EGLDisplay dpy;
 
-     EGLNativeWindowType window = android_createDisplaySurface();
+     WindowSurface windowSurface;
+     EGLNativeWindowType window = windowSurface.getSurface();
      
      dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
      eglInitialize(dpy, &majorVersion, &minorVersion);
@@ -90,11 +91,13 @@ int main(int argc, char** argv)
          }
      }
 
+     const GLfloat fh = h;
+     const GLfloat fw = w;
      const GLfloat vertices[4][2] = {
-             { 0,  0 },
-             { 0,  h },
-             { w,  h },
-             { w,  0 }
+             { 0,   0  },
+             { 0,   fh },
+             { fw,  fh },
+             { fw,  0  }
      };
 
      const GLfloat texCoords[4][2] = {

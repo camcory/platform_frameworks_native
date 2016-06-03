@@ -20,6 +20,13 @@
 #include <stdint.h>
 #include <errno.h>
 
+// We would eliminate the non-conforming zero-length array, but we can't since
+// this is effectively included from the Linux kernel
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wzero-length-array"
+#include <sync/sync.h>
+#pragma clang diagnostic pop
+
 #include <utils/Errors.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
@@ -42,7 +49,7 @@ GraphicBufferMapper::GraphicBufferMapper()
     int err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &module);
     ALOGE_IF(err, "FATAL: can't find the %s module", GRALLOC_HARDWARE_MODULE_ID);
     if (err == 0) {
-        mAllocMod = (gralloc_module_t const *)module;
+        mAllocMod = reinterpret_cast<gralloc_module_t const *>(module);
     }
 }
 
@@ -70,13 +77,13 @@ status_t GraphicBufferMapper::unregisterBuffer(buffer_handle_t handle)
     return err;
 }
 
-status_t GraphicBufferMapper::lock(buffer_handle_t handle, 
-        int usage, const Rect& bounds, void** vaddr)
+status_t GraphicBufferMapper::lock(buffer_handle_t handle,
+        uint32_t usage, const Rect& bounds, void** vaddr)
 {
     ATRACE_CALL();
     status_t err;
 
-    err = mAllocMod->lock(mAllocMod, handle, usage,
+    err = mAllocMod->lock(mAllocMod, handle, static_cast<int>(usage),
             bounds.left, bounds.top, bounds.width(), bounds.height(),
             vaddr);
 
@@ -85,12 +92,16 @@ status_t GraphicBufferMapper::lock(buffer_handle_t handle,
 }
 
 status_t GraphicBufferMapper::lockYCbCr(buffer_handle_t handle,
-        int usage, const Rect& bounds, android_ycbcr *ycbcr)
+        uint32_t usage, const Rect& bounds, android_ycbcr *ycbcr)
 {
     ATRACE_CALL();
     status_t err;
 
-    err = mAllocMod->lock_ycbcr(mAllocMod, handle, usage,
+    if (mAllocMod->lock_ycbcr == NULL) {
+        return -EINVAL; // do not log failure
+    }
+
+    err = mAllocMod->lock_ycbcr(mAllocMod, handle, static_cast<int>(usage),
             bounds.left, bounds.top, bounds.width(), bounds.height(),
             ycbcr);
 
@@ -106,6 +117,76 @@ status_t GraphicBufferMapper::unlock(buffer_handle_t handle)
     err = mAllocMod->unlock(mAllocMod, handle);
 
     ALOGW_IF(err, "unlock(...) failed %d (%s)", err, strerror(-err));
+    return err;
+}
+
+status_t GraphicBufferMapper::lockAsync(buffer_handle_t handle,
+        uint32_t usage, const Rect& bounds, void** vaddr, int fenceFd)
+{
+    ATRACE_CALL();
+    status_t err;
+
+    if (mAllocMod->common.module_api_version >= GRALLOC_MODULE_API_VERSION_0_3) {
+        err = mAllocMod->lockAsync(mAllocMod, handle, static_cast<int>(usage),
+                bounds.left, bounds.top, bounds.width(), bounds.height(),
+                vaddr, fenceFd);
+    } else {
+        if (fenceFd >= 0) {
+            sync_wait(fenceFd, -1);
+            close(fenceFd);
+        }
+        err = mAllocMod->lock(mAllocMod, handle, static_cast<int>(usage),
+                bounds.left, bounds.top, bounds.width(), bounds.height(),
+                vaddr);
+    }
+
+    ALOGW_IF(err, "lockAsync(...) failed %d (%s)", err, strerror(-err));
+    return err;
+}
+
+status_t GraphicBufferMapper::lockAsyncYCbCr(buffer_handle_t handle,
+        uint32_t usage, const Rect& bounds, android_ycbcr *ycbcr, int fenceFd)
+{
+    ATRACE_CALL();
+    status_t err;
+
+    if (mAllocMod->common.module_api_version >= GRALLOC_MODULE_API_VERSION_0_3
+            && mAllocMod->lockAsync_ycbcr != NULL) {
+        err = mAllocMod->lockAsync_ycbcr(mAllocMod, handle,
+                static_cast<int>(usage), bounds.left, bounds.top,
+                bounds.width(), bounds.height(), ycbcr, fenceFd);
+    } else if (mAllocMod->lock_ycbcr != NULL) {
+        if (fenceFd >= 0) {
+            sync_wait(fenceFd, -1);
+            close(fenceFd);
+        }
+        err = mAllocMod->lock_ycbcr(mAllocMod, handle, static_cast<int>(usage),
+                bounds.left, bounds.top, bounds.width(), bounds.height(),
+                ycbcr);
+    } else {
+        if (fenceFd >= 0) {
+            close(fenceFd);
+        }
+        return -EINVAL; // do not log failure
+    }
+
+    ALOGW_IF(err, "lock(...) failed %d (%s)", err, strerror(-err));
+    return err;
+}
+
+status_t GraphicBufferMapper::unlockAsync(buffer_handle_t handle, int *fenceFd)
+{
+    ATRACE_CALL();
+    status_t err;
+
+    if (mAllocMod->common.module_api_version >= GRALLOC_MODULE_API_VERSION_0_3) {
+        err = mAllocMod->unlockAsync(mAllocMod, handle, fenceFd);
+    } else {
+        *fenceFd = -1;
+        err = mAllocMod->unlock(mAllocMod, handle);
+    }
+
+    ALOGW_IF(err, "unlockAsync(...) failed %d (%s)", err, strerror(-err));
     return err;
 }
 

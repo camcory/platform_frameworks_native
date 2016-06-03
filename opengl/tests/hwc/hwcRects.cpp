@@ -104,7 +104,6 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
-#include <ui/FramebufferNativeWindow.h>
 #include <ui/GraphicBuffer.h>
 
 #define LOG_TAG "hwcRectsTest"
@@ -205,7 +204,6 @@ main(int argc, char *argv[])
 {
     int     rv, opt;
     char   *chptr;
-    bool    error;
     string  str;
     char cmd[MAXCMD];
 
@@ -368,7 +366,6 @@ static Rectangle parseRect(string rectStr)
     istringstream in(rectStr);
     const struct hwcTestGraphicFormat *format;
     Rectangle rect;
-    struct hwc_rect hwcRect;
 
     // Graphic Format
     in >> str;

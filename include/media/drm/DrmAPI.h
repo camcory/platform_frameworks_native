@@ -80,7 +80,10 @@ namespace android {
             kDrmPluginEventProvisionRequired = 1,
             kDrmPluginEventKeyNeeded,
             kDrmPluginEventKeyExpired,
-            kDrmPluginEventVendorDefined
+            kDrmPluginEventVendorDefined,
+            kDrmPluginEventSessionReclaimed,
+            kDrmPluginEventExpirationUpdate,
+            kDrmPluginEventKeysChange,
         };
 
         // Drm keys can be for offline content or for online streaming.
@@ -91,6 +94,33 @@ namespace android {
             kKeyType_Offline,
             kKeyType_Streaming,
             kKeyType_Release
+        };
+
+        // Enumerate KeyRequestTypes to allow an app to determine the
+        // type of a key request returned from getKeyRequest.
+        enum KeyRequestType {
+            kKeyRequestType_Unknown,
+            kKeyRequestType_Initial,
+            kKeyRequestType_Renewal,
+            kKeyRequestType_Release
+        };
+
+        // Enumerate KeyStatusTypes which indicate the state of a key
+        enum KeyStatusType
+        {
+            kKeyStatusType_Usable,
+            kKeyStatusType_Expired,
+            kKeyStatusType_OutputNotAllowed,
+            kKeyStatusType_StatusPending,
+            kKeyStatusType_InternalError
+        };
+
+        // Used by sendKeysChange to report the usability status of each
+        // key to the app.
+        struct KeyStatus
+        {
+            Vector<uint8_t> mKeyId;
+            KeyStatusType mType;
         };
 
         DrmPlugin() {}
@@ -135,7 +165,8 @@ namespace android {
                           Vector<uint8_t> const &initData,
                           String8 const &mimeType, KeyType keyType,
                           KeyedVector<String8, String8> const &optionalParameters,
-                          Vector<uint8_t> &request, String8 &defaultUrl) = 0;
+                          Vector<uint8_t> &request, String8 &defaultUrl,
+                          KeyRequestType *keyRequestType) = 0;
 
         //
         // After a key response is received by the app, it is provided to the
@@ -178,12 +209,19 @@ namespace android {
         // provisioning server.
         //
         // If successful, the opaque provision request blob is returned to the caller.
-        virtual status_t getProvisionRequest(Vector<uint8_t> &request,
+        virtual status_t getProvisionRequest(String8 const &cert_type,
+                                             String8 const &cert_authority,
+                                             Vector<uint8_t> &request,
                                              String8 &defaultUrl) = 0;
 
         // After a provision response is received by the app, it is provided to the
         // Drm plugin using provideProvisionResponse.
-        virtual status_t provideProvisionResponse(Vector<uint8_t> const &response) = 0;
+        virtual status_t provideProvisionResponse(Vector<uint8_t> const &response,
+                                                  Vector<uint8_t> &certificate,
+                                                  Vector<uint8_t> &wrapped_key) = 0;
+
+        // Remove device provisioning.
+        virtual status_t unprovisionDevice() = 0;
 
         // A means of enforcing the contractual requirement for a concurrent stream
         // limit per subscriber across devices is provided via SecureStop.  SecureStop
@@ -202,7 +240,9 @@ namespace android {
         // confirmed. The persisted record on the client is only removed after positive
         // confirmation that the server received the message using releaseSecureStops().
         virtual status_t getSecureStops(List<Vector<uint8_t> > &secureStops) = 0;
+        virtual status_t getSecureStop(Vector<uint8_t> const &ssid, Vector<uint8_t> &secureStop) = 0;
         virtual status_t releaseSecureStops(Vector<uint8_t> const &ssRelease) = 0;
+        virtual status_t releaseAllSecureStops() = 0;
 
         // Read a property value given the device property string.  There are a few forms
         // of property access methods, depending on the data type returned.
@@ -290,6 +330,15 @@ namespace android {
                                 bool &match) = 0;
 
 
+        // Compute an RSA signature on the provided message using the algorithm
+        // specified by algorithm.
+        virtual status_t signRSA(Vector<uint8_t> const &sessionId,
+                                 String8 const &algorithm,
+                                 Vector<uint8_t> const &message,
+                                 Vector<uint8_t> const &wrapped_key,
+                                 Vector<uint8_t> &signature) = 0;
+
+
         status_t setListener(const sp<DrmPluginListener>& listener) {
             Mutex::Autolock lock(mEventLock);
             mListener = listener;
@@ -297,10 +346,17 @@ namespace android {
         }
 
     protected:
-        // Plugins call sendEvent to deliver events to the java app
+        // Plugins call these methods to deliver events to the java app
         void sendEvent(EventType eventType, int extra,
                        Vector<uint8_t> const *sessionId,
                        Vector<uint8_t> const *data);
+
+        void sendExpirationUpdate(Vector<uint8_t> const *sessionId,
+                                  int64_t expiryTimeInMS);
+
+        void sendKeysChange(Vector<uint8_t> const *sessionId,
+                            Vector<DrmPlugin::KeyStatus> const *keyStatusList,
+                            bool hasNewUsableKey);
 
     private:
         Mutex mEventLock;
@@ -313,14 +369,20 @@ namespace android {
     {
     public:
         virtual void sendEvent(DrmPlugin::EventType eventType, int extra,
-                               Vector<uint8_t> const *sesionId,
+                               Vector<uint8_t> const *sessionId,
                                Vector<uint8_t> const *data) = 0;
+
+        virtual void sendExpirationUpdate(Vector<uint8_t> const *sessionId,
+                                          int64_t expiryTimeInMS) = 0;
+
+        virtual void sendKeysChange(Vector<uint8_t> const *sessionId,
+                                    Vector<DrmPlugin::KeyStatus> const *keyStatusList,
+                                    bool hasNewUsableKey) = 0;
     };
 
     inline void DrmPlugin::sendEvent(EventType eventType, int extra,
                                      Vector<uint8_t> const *sessionId,
                                      Vector<uint8_t> const *data) {
-
         mEventLock.lock();
         sp<DrmPluginListener> listener = mListener;
         mEventLock.unlock();
@@ -330,6 +392,28 @@ namespace android {
         }
     }
 
+    inline void DrmPlugin::sendExpirationUpdate(Vector<uint8_t> const *sessionId,
+                                                int64_t expiryTimeInMS) {
+        mEventLock.lock();
+        sp<DrmPluginListener> listener = mListener;
+        mEventLock.unlock();
+
+        if (listener != NULL) {
+            listener->sendExpirationUpdate(sessionId, expiryTimeInMS);
+        }
+    }
+
+    inline void DrmPlugin::sendKeysChange(Vector<uint8_t> const *sessionId,
+                                          Vector<DrmPlugin::KeyStatus> const *keyStatusList,
+                                          bool hasNewUsableKey) {
+        mEventLock.lock();
+        sp<DrmPluginListener> listener = mListener;
+        mEventLock.unlock();
+
+        if (listener != NULL) {
+            listener->sendKeysChange(sessionId, keyStatusList, hasNewUsableKey);
+        }
+    }
 }  // namespace android
 
 #endif // DRM_API_H_

@@ -24,6 +24,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <ui/mat4.h>
+#include <Transform.h>
+
+#define EGL_NO_CONFIG ((EGLConfig)0)
 
 // ---------------------------------------------------------------------------
 namespace android {
@@ -44,8 +47,9 @@ class RenderEngine {
     };
     static GlesVersion parseGlesVersion(const char* str);
 
+    EGLConfig mEGLConfig;
     EGLContext mEGLContext;
-    void setEGLContext(EGLContext ctxt);
+    void setEGLHandles(EGLConfig config, EGLContext ctxt);
 
     virtual void bindImageAsFramebuffer(EGLImageKHR image, uint32_t* texName, uint32_t* fbName, uint32_t* status) = 0;
     virtual void unbindFramebuffer(uint32_t texName, uint32_t fbName) = 0;
@@ -55,12 +59,15 @@ protected:
     virtual ~RenderEngine() = 0;
 
 public:
-    static RenderEngine* create(EGLDisplay display, EGLConfig config);
+    static RenderEngine* create(EGLDisplay display, int hwcFormat);
+
+    static EGLConfig chooseEglConfig(EGLDisplay display, int format);
 
     // dump the extension strings. always call the base class.
     virtual void dump(String8& result);
 
     // helpers
+    void flush();
     void clearWithColor(float red, float green, float blue, float alpha);
     void fillRegionWithColor(const Region& region, uint32_t height,
             float red, float green, float blue, float alpha);
@@ -84,12 +91,17 @@ public:
 
     // set-up
     virtual void checkErrors() const;
-    virtual void setViewportAndProjection(size_t vpw, size_t vph, size_t w, size_t h, bool yswap) = 0;
+    virtual void setViewportAndProjection(size_t vpw, size_t vph,
+            Rect sourceCrop, size_t hwh, bool yswap, Transform::orientation_flags rotation) = 0;
     virtual void setupLayerBlending(bool premultipliedAlpha, bool opaque, int alpha) = 0;
     virtual void setupDimLayerBlending(int alpha) = 0;
     virtual void setupLayerTexturing(const Texture& texture) = 0;
     virtual void setupLayerBlackedOut() = 0;
     virtual void setupFillWithColor(float r, float g, float b, float a) = 0;
+
+    virtual mat4 setupColorTransform(const mat4& /* colorTransform */) {
+        return mat4();
+    }
 
     virtual void disableTexturing() = 0;
     virtual void disableBlending() = 0;
@@ -97,16 +109,11 @@ public:
     // drawing
     virtual void drawMesh(const Mesh& mesh) = 0;
 
-    // grouping
-    // creates a color-transform group, everything drawn in the group will be
-    // transformed by the given color transform when endGroup() is called.
-    virtual void beginGroup(const mat4& colorTransform) = 0;
-    virtual void endGroup() = 0;
-
     // queries
     virtual size_t getMaxTextureSize() const = 0;
     virtual size_t getMaxViewportDims() const = 0;
 
+    EGLConfig getEGLConfig() const;
     EGLContext getEGLContext() const;
 };
 

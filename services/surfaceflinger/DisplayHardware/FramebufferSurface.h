@@ -39,20 +39,21 @@ class FramebufferSurface : public ConsumerBase,
 public:
     FramebufferSurface(HWComposer& hwc, int disp, const sp<IGraphicBufferConsumer>& consumer);
 
-    virtual status_t beginFrame();
+    virtual status_t beginFrame(bool mustRecompose);
     virtual status_t prepareFrame(CompositionType compositionType);
     virtual status_t compositionComplete();
     virtual status_t advanceFrame();
     virtual void onFrameCommitted();
+    virtual void dumpAsString(String8& result) const;
 
-    // Implementation of DisplaySurface::dump(). Note that ConsumerBase also
-    // has a non-virtual dump() with the same signature.
-    virtual void dump(String8& result) const;
+    // Cannot resize a buffers in a FramebufferSurface. Only works with virtual
+    // displays.
+    virtual void resizeBuffers(const uint32_t /*w*/, const uint32_t /*h*/) { };
 
 private:
     virtual ~FramebufferSurface() { }; // this class cannot be overloaded
 
-    virtual void onFrameAvailable();
+    virtual void onFrameAvailable(const BufferItem& item);
     virtual void freeBufferLocked(int slotIndex);
 
     virtual void dumpLocked(String8& result, const char* prefix) const;

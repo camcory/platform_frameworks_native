@@ -33,7 +33,6 @@ LOCAL_SRC_FILES:= 	       \
 #
 
 LOCAL_SHARED_LIBRARIES += libcutils libutils liblog libGLES_trace
-LOCAL_LDLIBS := -lpthread -ldl
 LOCAL_MODULE:= libEGL
 LOCAL_LDFLAGS += -Wl,--exclude-libs=ALL
 LOCAL_SHARED_LIBRARIES += libdl
@@ -47,9 +46,6 @@ LOCAL_CFLAGS += -DEGL_TRACE=1
 
 ifeq ($(BOARD_ALLOW_EGL_HIBERNATION),true)
   LOCAL_CFLAGS += -DBOARD_ALLOW_EGL_HIBERNATION
-endif
-ifeq ($(TARGET_BOARD_PLATFORM), omap4)
-  LOCAL_CFLAGS += -DWORKAROUND_BUG_10194508=1
 endif
 ifneq ($(MAX_EGL_CACHE_ENTRY_SIZE),)
   LOCAL_CFLAGS += -DMAX_EGL_CACHE_ENTRY_SIZE=$(MAX_EGL_CACHE_ENTRY_SIZE)
@@ -78,8 +74,8 @@ LOCAL_SRC_FILES:= 		\
 	GLES_CM/gl.cpp.arm 	\
 #
 
+LOCAL_CLANG := false
 LOCAL_SHARED_LIBRARIES += libcutils liblog libEGL
-LOCAL_LDLIBS := -lpthread -ldl
 LOCAL_MODULE:= libGLESv1_CM
 
 LOCAL_SHARED_LIBRARIES += libdl
@@ -89,6 +85,9 @@ LOCAL_C_INCLUDES += bionic/libc/private
 LOCAL_CFLAGS += -DLOG_TAG=\"libGLESv1\"
 LOCAL_CFLAGS += -DGL_GLEXT_PROTOTYPES -DEGL_EGLEXT_PROTOTYPES
 LOCAL_CFLAGS += -fvisibility=hidden
+
+# TODO: This is to work around b/20093774. Remove after root cause is fixed
+LOCAL_LDFLAGS_arm += -Wl,--hash-style,both
 
 include $(BUILD_SHARED_LIBRARY)
 
@@ -103,8 +102,8 @@ LOCAL_SRC_FILES:= 		\
 	GLES2/gl2.cpp.arm 	\
 #
 
+LOCAL_CLANG := false
 LOCAL_SHARED_LIBRARIES += libcutils libutils liblog libEGL
-LOCAL_LDLIBS := -lpthread -ldl
 LOCAL_MODULE:= libGLESv2
 
 LOCAL_SHARED_LIBRARIES += libdl
@@ -115,21 +114,19 @@ LOCAL_CFLAGS += -DLOG_TAG=\"libGLESv2\"
 LOCAL_CFLAGS += -DGL_GLEXT_PROTOTYPES -DEGL_EGLEXT_PROTOTYPES
 LOCAL_CFLAGS += -fvisibility=hidden
 
-include $(BUILD_SHARED_LIBRARY)
+# TODO: This is to work around b/20093774. Remove after root cause is fixed
+LOCAL_LDFLAGS_arm += -Wl,--hash-style,both
 
 # Symlink libGLESv3.so -> libGLESv2.so
 # Platform modules should link against libGLESv2.so (-lGLESv2), but NDK apps
 # will be linked against libGLESv3.so.
-LIBGLESV2 := $(LOCAL_INSTALLED_MODULE)
-LIBGLESV3 := $(subst libGLESv2,libGLESv3,$(LIBGLESV2))
-$(LIBGLESV3): $(LIBGLESV2)
-	@echo "Symlink: $@ -> $(notdir $<)"
-	@mkdir -p $(dir $@)
-	$(hide) ln -sf $(notdir $<) $@
-ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
-	$(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(LIBGLESV3)
-LIBGLESV2 :=
-LIBGLESV3 :=
+# Note we defer the evaluation of the LOCAL_POST_INSTALL_CMD,
+# so $(LOCAL_INSTALLED_MODULE) will be expanded to correct value,
+# even for both 32-bit and 64-bit installed files in multilib build.
+LOCAL_POST_INSTALL_CMD = \
+    $(hide) ln -sf $(notdir $(LOCAL_INSTALLED_MODULE)) $(dir $(LOCAL_INSTALLED_MODULE))libGLESv3.so
+
+include $(BUILD_SHARED_LIBRARY)
 
 ###############################################################################
 # Build the ETC1 host static library
@@ -141,7 +138,6 @@ LOCAL_SRC_FILES:= 		\
 	ETC1/etc1.cpp 	\
 #
 
-LOCAL_LDLIBS := -lpthread -ldl
 LOCAL_MODULE:= libETC1
 
 include $(BUILD_HOST_STATIC_LIBRARY)
@@ -156,7 +152,6 @@ LOCAL_SRC_FILES:= 		\
 	ETC1/etc1.cpp 	\
 #
 
-LOCAL_LDLIBS := -lpthread -ldl
 LOCAL_MODULE:= libETC1
 
 include $(BUILD_SHARED_LIBRARY)
