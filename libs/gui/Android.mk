@@ -64,6 +64,7 @@ LOCAL_SRC_FILES := \
 	ISurfaceComposer.cpp \
 	ISurfaceComposerClient.cpp \
 	LayerState.cpp \
+	OccupancyTracker.cpp \
 	Sensor.cpp \
 	SensorEventQueue.cpp \
 	SensorManager.cpp \
@@ -91,12 +92,6 @@ ifeq ($(TARGET_BOARD_PLATFORM), tegra)
 endif
 ifeq ($(TARGET_BOARD_PLATFORM), tegra3)
 	LOCAL_CFLAGS += -DDONT_USE_FENCE_SYNC
-endif
-
-ifeq ($(BOARD_ENABLE_GPU_PROTECTED_CONTENT),true)
-	LOCAL_CFLAGS += -DENABLE_GPU_PROTECTED_CONTENT=true
-else
-	LOCAL_CFLAGS += -DENABLE_GPU_PROTECTED_CONTENT=false
 endif
 
 include $(BUILD_SHARED_LIBRARY)

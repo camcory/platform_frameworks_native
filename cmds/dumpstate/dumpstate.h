@@ -79,7 +79,25 @@ static const int WEIGHT_FILE = 5;
  * It would be better to take advantage of the C++ migration and encapsulate the state in an object,
  * but that will be better handled in a major C++ refactoring, which would also get rid of other C
  * idioms (like using std::string instead of char*, removing varargs, etc...) */
-extern int do_update_progress, progress, weight_total;
+extern int do_update_progress, progress, weight_total, control_socket_fd;
+
+/* full path of the directory where the bugreport files will be written */
+extern std::string bugreport_dir;
+
+/* root dir for all files copied as-is into the bugreport. */
+extern const std::string ZIP_ROOT_DIR;
+
+/* Checkes whether dumpstate is generating a zipped bugreport. */
+bool is_zipping();
+
+/* adds a new entry to the existing zip file. */
+bool add_zip_entry(const std::string& entry_name, const std::string& entry_path);
+
+/* adds a new entry to the existing zip file. */
+bool add_zip_entry_from_fd(const std::string& entry_name, int fd);
+
+/* adds all files from a directory to the zipped bugreport file */
+void add_dir(const char *dir, bool recursive);
 
 /* prints the contents of a file */
 int dump_file(const char *title, const char *path);
@@ -184,11 +202,14 @@ bool is_dir(const char* pathname);
 /** Gets the last modification time of a file, or default time if file is not found. */
 time_t get_mtime(int fd, time_t default_mtime);
 
-/* dump eMMC Extended CSD data */
+/* Dumps eMMC Extended CSD data. */
 void dump_emmc_ecsd(const char *ext_csd_path);
 
-/** gets command-line arguments */
+/** Gets command-line arguments. */
 void format_args(int argc, const char *argv[], std::string *args);
+
+/** Tells if the device is running a user build. */
+bool is_user_build();
 
 /*
  * Helper class used to report how long it takes for a section to finish.

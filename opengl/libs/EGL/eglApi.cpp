@@ -33,12 +33,18 @@
 #include <cutils/properties.h>
 #include <cutils/memory.h>
 
+#include <gui/ISurfaceComposer.h>
+
 #include <ui/GraphicBuffer.h>
 
 #include <utils/KeyedVector.h>
 #include <utils/SortedVector.h>
 #include <utils/String8.h>
 #include <utils/Trace.h>
+
+#include "binder/Binder.h"
+#include "binder/Parcel.h"
+#include "binder/IServiceManager.h"
 
 #include "../egl_impl.h"
 #include "../hooks.h"
@@ -53,6 +59,8 @@ using namespace android;
 // This extension has not been ratified yet, so can't be shipped.
 // Implementation is incomplete and untested.
 #define ENABLE_EGL_KHR_GL_COLORSPACE 0
+
+#define ENABLE_EGL_ANDROID_GET_FRAME_TIMESTAMPS 0
 
 // ----------------------------------------------------------------------------
 
@@ -84,6 +92,9 @@ extern char const * const gBuiltinExtensionString =
         "EGL_KHR_swap_buffers_with_damage "
         "EGL_ANDROID_create_native_client_buffer "
         "EGL_ANDROID_front_buffer_auto_refresh "
+#if ENABLE_EGL_ANDROID_GET_FRAME_TIMESTAMPS
+        "EGL_ANDROID_get_frame_timestamps "
+#endif
         ;
 extern char const * const gExtensionString  =
         "EGL_KHR_image "                        // mandatory
@@ -207,6 +218,12 @@ static const extention_map_t sExtensionMap[] = {
             (__eglMustCastToProperFunctionPointerType)&eglGetStreamFileDescriptorKHR },
     { "eglCreateStreamFromFileDescriptorKHR",
             (__eglMustCastToProperFunctionPointerType)&eglCreateStreamFromFileDescriptorKHR },
+
+    // EGL_ANDROID_get_frame_timestamps
+    { "eglGetFrameTimestampsANDROID",
+            (__eglMustCastToProperFunctionPointerType)&eglGetFrameTimestampsANDROID },
+    { "eglQueryTimestampSupportedANDROID",
+            (__eglMustCastToProperFunctionPointerType)&eglQueryTimestampSupportedANDROID },
 };
 
 /*
@@ -1196,7 +1213,7 @@ EGLBoolean eglSurfaceAttrib(
     if (!_s.get())
         return setError(EGL_BAD_SURFACE, EGL_FALSE);
 
-    egl_surface_t const * const s = get_surface(surface);
+    egl_surface_t * const s = get_surface(surface);
 
     if (attribute == EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID) {
         int err = native_window_set_auto_refresh(s->win.get(),
@@ -1204,6 +1221,13 @@ EGLBoolean eglSurfaceAttrib(
         return (err == NO_ERROR) ? EGL_TRUE :
             setError(EGL_BAD_SURFACE, EGL_FALSE);
     }
+
+#if ENABLE_EGL_ANDROID_GET_FRAME_TIMESTAMPS
+    if (attribute == EGL_TIMESTAMPS_ANDROID) {
+        s->enableTimestamps = value;
+        return EGL_TRUE;
+    }
+#endif
 
     if (s->cnx->egl.eglSurfaceAttrib) {
         return s->cnx->egl.eglSurfaceAttrib(
@@ -1794,9 +1818,9 @@ EGLClientBuffer eglCreateNativeClientBufferANDROID(const EGLint *attrib_list)
     uint32_t blue_size = 0;
     uint32_t alpha_size = 0;
 
-#define GET_POSITIVE_VALUE(case_name, target) \
+#define GET_NONNEGATIVE_VALUE(case_name, target) \
     case case_name: \
-        if (value > 0) { \
+        if (value >= 0) { \
             target = value; \
         } else { \
             return setError(EGL_BAD_PARAMETER, (EGLClientBuffer)0); \
@@ -1808,12 +1832,12 @@ EGLClientBuffer eglCreateNativeClientBufferANDROID(const EGLint *attrib_list)
             GLint attr = *attrib_list++;
             GLint value = *attrib_list++;
             switch (attr) {
-                GET_POSITIVE_VALUE(EGL_WIDTH, width);
-                GET_POSITIVE_VALUE(EGL_HEIGHT, height);
-                GET_POSITIVE_VALUE(EGL_RED_SIZE, red_size);
-                GET_POSITIVE_VALUE(EGL_GREEN_SIZE, green_size);
-                GET_POSITIVE_VALUE(EGL_BLUE_SIZE, blue_size);
-                GET_POSITIVE_VALUE(EGL_ALPHA_SIZE, alpha_size);
+                GET_NONNEGATIVE_VALUE(EGL_WIDTH, width);
+                GET_NONNEGATIVE_VALUE(EGL_HEIGHT, height);
+                GET_NONNEGATIVE_VALUE(EGL_RED_SIZE, red_size);
+                GET_NONNEGATIVE_VALUE(EGL_GREEN_SIZE, green_size);
+                GET_NONNEGATIVE_VALUE(EGL_BLUE_SIZE, blue_size);
+                GET_NONNEGATIVE_VALUE(EGL_ALPHA_SIZE, alpha_size);
                 case EGL_NATIVE_BUFFER_USAGE_ANDROID:
                     if (value & EGL_NATIVE_BUFFER_USAGE_PROTECTED_BIT_ANDROID) {
                         usage |= GRALLOC_USAGE_PROTECTED;
@@ -1836,7 +1860,7 @@ EGLClientBuffer eglCreateNativeClientBufferANDROID(const EGLint *attrib_list)
             }
         }
     }
-#undef GET_POSITIVE_VALUE
+#undef GET_NONNEGATIVE_VALUE
 
     // Validate format.
     if (red_size == 8 && green_size == 8 && blue_size == 8) {
@@ -1847,25 +1871,84 @@ EGLClientBuffer eglCreateNativeClientBufferANDROID(const EGLint *attrib_list)
         }
     } else if (red_size == 5 && green_size == 6 && blue_size == 5 &&
                alpha_size == 0) {
-        format == HAL_PIXEL_FORMAT_RGB_565;
+        format = HAL_PIXEL_FORMAT_RGB_565;
     } else {
         ALOGE("Invalid native pixel format { r=%d, g=%d, b=%d, a=%d }",
                 red_size, green_size, blue_size, alpha_size);
         return setError(EGL_BAD_PARAMETER, (EGLClientBuffer)0);
     }
 
-    GraphicBuffer* gBuffer = new GraphicBuffer(width, height, format, usage);
-    const status_t err = gBuffer->initCheck();
+#define CHECK_ERROR_CONDITION(message) \
+    if (err != NO_ERROR) { \
+        ALOGE(message); \
+        goto error_condition; \
+    }
+
+    // The holder is used to destroy the buffer if an error occurs.
+    GraphicBuffer* gBuffer = new GraphicBuffer();
+    sp<IServiceManager> sm = defaultServiceManager();
+    sp<IBinder> surfaceFlinger = sm->getService(String16("SurfaceFlinger"));
+    sp<IBinder> allocator;
+    Parcel sc_data, sc_reply, data, reply;
+    status_t err = NO_ERROR;
+    if (sm == NULL) {
+        ALOGE("Unable to connect to ServiceManager");
+        goto error_condition;
+    }
+
+    // Obtain an allocator.
+    if (surfaceFlinger == NULL) {
+        ALOGE("Unable to connect to SurfaceFlinger");
+        goto error_condition;
+    }
+    sc_data.writeInterfaceToken(String16("android.ui.ISurfaceComposer"));
+    err = surfaceFlinger->transact(
+            BnSurfaceComposer::CREATE_GRAPHIC_BUFFER_ALLOC, sc_data, &sc_reply);
+    CHECK_ERROR_CONDITION("Unable to obtain allocator from SurfaceFlinger");
+    allocator = sc_reply.readStrongBinder();
+
+    if (allocator == NULL) {
+        ALOGE("Unable to obtain an ISurfaceComposer");
+        goto error_condition;
+    }
+    data.writeInterfaceToken(String16("android.ui.IGraphicBufferAlloc"));
+    err = data.writeUint32(width);
+    CHECK_ERROR_CONDITION("Unable to write width");
+    err = data.writeUint32(height);
+    CHECK_ERROR_CONDITION("Unable to write height");
+    err = data.writeInt32(static_cast<int32_t>(format));
+    CHECK_ERROR_CONDITION("Unable to write format");
+    err = data.writeUint32(usage);
+    CHECK_ERROR_CONDITION("Unable to write usage");
+    err = data.writeUtf8AsUtf16(
+            std::string("[eglCreateNativeClientBufferANDROID pid ") +
+            std::to_string(getpid()) + ']');
+    CHECK_ERROR_CONDITION("Unable to write requestor name");
+    err = allocator->transact(IBinder::FIRST_CALL_TRANSACTION, data,
+            &reply);
+    CHECK_ERROR_CONDITION(
+            "Unable to request buffer allocation from surface composer");
+    err = reply.readInt32();
+    CHECK_ERROR_CONDITION("Unable to obtain buffer from surface composer");
+    err = reply.read(*gBuffer);
+    CHECK_ERROR_CONDITION("Unable to read buffer from surface composer");
+
+    err = gBuffer->initCheck();
     if (err != NO_ERROR) {
         ALOGE("Unable to create native buffer { w=%d, h=%d, f=%d, u=%#x }: %#x",
                 width, height, format, usage, err);
-        // Destroy the buffer.
-        sp<GraphicBuffer> holder(gBuffer);
-        return setError(EGL_BAD_ALLOC, (EGLClientBuffer)0);
+        goto error_condition;
     }
     ALOGD("Created new native buffer %p { w=%d, h=%d, f=%d, u=%#x }",
             gBuffer, width, height, format, usage);
     return static_cast<EGLClientBuffer>(gBuffer->getNativeBuffer());
+
+#undef CHECK_ERROR_CONDITION
+
+error_condition:
+    // Delete the buffer.
+    sp<GraphicBuffer> holder(gBuffer);
+    return setError(EGL_BAD_ALLOC, (EGLClientBuffer)0);
 }
 
 // ----------------------------------------------------------------------------
@@ -1934,4 +2017,106 @@ EGLBoolean eglSetDamageRegionKHR(EGLDisplay dpy, EGLSurface surface,
     }
 
     return EGL_FALSE;
+}
+
+EGLBoolean eglGetFrameTimestampsANDROID(EGLDisplay dpy, EGLSurface surface,
+        EGLint framesAgo, EGLint numTimestamps, const EGLint *timestamps,
+        EGLnsecsANDROID *values)
+{
+    clearError();
+
+    const egl_display_ptr dp = validate_display(dpy);
+    if (!dp) {
+        setError(EGL_BAD_DISPLAY, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    SurfaceRef _s(dp.get(), surface);
+    if (!_s.get()) {
+        setError(EGL_BAD_SURFACE, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    egl_surface_t const * const s = get_surface(surface);
+
+    if (!s->enableTimestamps) {
+        setError(EGL_BAD_SURFACE, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    nsecs_t* postedTime = nullptr;
+    nsecs_t* acquireTime = nullptr;
+    nsecs_t* refreshStartTime = nullptr;
+    nsecs_t* GLCompositionDoneTime = nullptr;
+    nsecs_t* displayRetireTime = nullptr;
+    nsecs_t* releaseTime = nullptr;
+
+    for (int i = 0; i < numTimestamps; i++) {
+        switch (timestamps[i]) {
+            case EGL_QUEUE_TIME_ANDROID:
+                postedTime = &values[i];
+                break;
+            case EGL_RENDERING_COMPLETE_TIME_ANDROID:
+                acquireTime = &values[i];
+                break;
+            case EGL_COMPOSITION_START_TIME_ANDROID:
+                refreshStartTime = &values[i];
+                break;
+            case EGL_COMPOSITION_FINISHED_TIME_ANDROID:
+                GLCompositionDoneTime = &values[i];
+                break;
+            case EGL_DISPLAY_RETIRE_TIME_ANDROID:
+                displayRetireTime = &values[i];
+                break;
+            case EGL_READS_DONE_TIME_ANDROID:
+                releaseTime = &values[i];
+                break;
+            default:
+                setError(EGL_BAD_PARAMETER, EGL_FALSE);
+                return EGL_FALSE;
+        }
+    }
+
+    status_t ret = native_window_get_frame_timestamps(s->win.get(), framesAgo,
+            postedTime, acquireTime, refreshStartTime, GLCompositionDoneTime,
+            displayRetireTime, releaseTime);
+
+    if (ret != NO_ERROR) {
+        setError(EGL_BAD_ACCESS, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    return EGL_TRUE;
+}
+
+EGLBoolean eglQueryTimestampSupportedANDROID(EGLDisplay dpy, EGLSurface surface,
+        EGLint timestamp)
+{
+    clearError();
+
+    const egl_display_ptr dp = validate_display(dpy);
+    if (!dp) {
+        setError(EGL_BAD_DISPLAY, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    SurfaceRef _s(dp.get(), surface);
+    if (!_s.get()) {
+        setError(EGL_BAD_SURFACE, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    switch (timestamp) {
+#if ENABLE_EGL_ANDROID_GET_FRAME_TIMESTAMPS
+        case EGL_QUEUE_TIME_ANDROID:
+        case EGL_RENDERING_COMPLETE_TIME_ANDROID:
+        case EGL_COMPOSITION_START_TIME_ANDROID:
+        case EGL_COMPOSITION_FINISHED_TIME_ANDROID:
+        case EGL_DISPLAY_RETIRE_TIME_ANDROID:
+        case EGL_READS_DONE_TIME_ANDROID:
+            return EGL_TRUE;
+#endif
+        default:
+            return EGL_FALSE;
+    }
 }
