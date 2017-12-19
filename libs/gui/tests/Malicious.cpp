@@ -38,7 +38,7 @@ public:
     }
     status_t setAsyncMode(bool async) override { return mProducer->setAsyncMode(async); }
     status_t dequeueBuffer(int* slot, sp<Fence>* fence, uint32_t w, uint32_t h, PixelFormat format,
-                           uint64_t usage, uint64_t* outBufferAge,
+                           uint32_t usage, uint64_t* outBufferAge,
                            FrameEventHistoryDelta* outTimestamps) override {
         return mProducer->dequeueBuffer(slot, fence, w, h, format, usage, outBufferAge,
                                         outTimestamps);
@@ -69,7 +69,7 @@ public:
         return mProducer->setSidebandStream(stream);
     }
     void allocateBuffers(uint32_t width, uint32_t height, PixelFormat format,
-                         uint64_t usage) override {
+                         uint32_t usage) override {
         mProducer->allocateBuffers(width, height, format, usage);
     }
     status_t allowAllocation(bool allow) override { return mProducer->allowAllocation(allow); }
@@ -107,7 +107,11 @@ public:
 
     // Override dequeueBuffer, optionally corrupting the returned slot number
     status_t dequeueBuffer(int* buf, sp<Fence>* fence, uint32_t width, uint32_t height,
+<<<<<<< HEAD
+                           PixelFormat format, uint32_t usage,
+=======
                            PixelFormat format, uint64_t usage, uint64_t* outBufferAge,
+>>>>>>> a2eb34c... Have the Surface class track the buffer age.
                            FrameEventHistoryDelta* outTimestamps) override {
         EXPECT_EQ(BUFFER_NEEDS_REALLOCATION,
                   mProducer->dequeueBuffer(buf, fence, width, height, format, usage, outBufferAge,

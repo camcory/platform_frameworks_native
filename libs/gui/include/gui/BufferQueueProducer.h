@@ -81,7 +81,7 @@ public:
     // In both cases, the producer will need to call requestBuffer to get a
     // GraphicBuffer handle for the returned slot.
     virtual status_t dequeueBuffer(int* outSlot, sp<Fence>* outFence, uint32_t width,
-                                   uint32_t height, PixelFormat format, uint64_t usage,
+                                   uint32_t height, PixelFormat format, uint32_t usage,
                                    uint64_t* outBufferAge,
                                    FrameEventHistoryDelta* outTimestamps) override;
 
@@ -153,7 +153,7 @@ public:
 
     // See IGraphicBufferProducer::allocateBuffers
     virtual void allocateBuffers(uint32_t width, uint32_t height,
-            PixelFormat format, uint64_t usage) override;
+            PixelFormat format, uint32_t usage);
 
     // See IGraphicBufferProducer::allowAllocation
     virtual status_t allowAllocation(bool allow);
