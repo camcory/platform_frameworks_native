@@ -19,8 +19,6 @@
 //#define ATRACE_TAG ATRACE_TAG_GRAPHICS
 #include <utils/Log.h>
 
-#include <inttypes.h>
-
 #include <gui/BufferItem.h>
 #include <gui/BufferItemConsumer.h>
 
@@ -33,13 +31,13 @@
 namespace android {
 
 BufferItemConsumer::BufferItemConsumer(
-        const sp<IGraphicBufferConsumer>& consumer, uint64_t consumerUsage,
+        const sp<IGraphicBufferConsumer>& consumer, uint32_t consumerUsage,
         int bufferCount, bool controlledByApp) :
     ConsumerBase(consumer, controlledByApp)
 {
     status_t err = mConsumer->setConsumerUsageBits(consumerUsage);
     LOG_ALWAYS_FATAL_IF(err != OK,
-            "Failed to set consumer usage bits to %#" PRIx64, consumerUsage);
+            "Failed to set consumer usage bits to %#x", consumerUsage);
     if (bufferCount != DEFAULT_MAX_BUFFERS) {
         err = mConsumer->setMaxAcquiredBufferCount(bufferCount);
         LOG_ALWAYS_FATAL_IF(err != OK,
